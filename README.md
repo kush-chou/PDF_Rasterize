@@ -1,0 +1,97 @@
+# PDF Rasterize
+
+A Python-based tool to split a PDF by its bookmarks, rasterize the pages of the split files into high-quality images, and then merge them back into a new PDF. This process effectively flattens complex vector graphics into images, which can reduce file size and improve compatibility.
+
+The project provides both a command-line interface (CLI) and a graphical user interface (GUI).
+
+## Features
+
+*   **Splitting**: Splits a master PDF into multiple smaller PDFs based on its bookmark hierarchy.
+*   **Rasterizing**: Converts the pages of the split PDFs into high-resolution images using Ghostscript and ImageMagick.
+*   **Merging**: Combines the rasterized PDFs back into a single, final PDF.
+*   **Bookmark Recreation**: Preserves the original bookmark structure in the final merged PDF.
+*   **GUI & CLI**: Can be run through an easy-to-use graphical interface (built with PyQt6) or as a command-line script.
+*   **Parallel Processing**: Uses multiple CPU cores to speed up the rasterization process.
+*   **Flexible Configuration**: Allows customization of tool paths, resolution, and other settings.
+
+## Prerequisites
+
+Before you can run this project, you must have the following software installed on your system:
+
+1.  **Python 3.8+**: The project is written in Python.
+2.  **Ghostscript**: Used for converting PDF pages to PNG images.
+3.  **ImageMagick**: Used for combining the PNG images back into a PDF.
+
+Ensure that the executables for `gs` (Ghostscript) and `magick` (ImageMagick) are available in your system's PATH, or specify their locations in the `config.json` file.
+
+## Installation
+
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/kush-chou/PDF_Rasterize.git
+    cd PDF_Rasterize
+    ```
+
+2.  **Install Python dependencies:**
+    The project's dependencies are listed in `pyproject.toml`. The main dependency is `pypdf`. The GUI also requires `PyQt6`. You can install them using pip:
+    ```bash
+    pip install pypdf PyQt6
+    ```
+
+## Usage
+
+The project can be used via the GUI or the CLI.
+
+### Graphical User Interface (GUI)
+
+To run the GUI, execute the `pdf_gui.py` script:
+
+```bash
+python pdf_gui.py
+```
+
+The GUI provides two main tabs:
+*   **Split & Rasterize**: Select an input PDF and an output folder. Adjust settings like DPI and start the process.
+*   **Merge PDFs**: Select a directory containing previously rasterized PDFs to merge them into a final document.
+
+### Command-Line Interface (CLI)
+
+The core logic is available through `pdf_split_rasterize.py`.
+
+**To Split and Rasterize:**
+
+```bash
+python pdf_split_rasterize.py --input /path/to/your/document.pdf --output /path/to/output_folder --resolution 300
+```
+
+**Key Arguments:**
+*   `--input`: The source PDF file.
+*   `--output`: The directory where the output will be saved.
+*   `--resolution` or `-r`: The DPI for rasterization (default: 300).
+*   `--keep-originals`: Prevents the deletion of the intermediate split PDF files.
+*   `--workers` or `-w`: Number of parallel processes to use for rasterization.
+*   `--flatten-output`: Moves all generated files into a single flat directory.
+
+**To Merge:**
+
+```bash
+python pdf_split_rasterize.py --merge /path/to/output_folder
+```
+
+**Key Arguments:**
+*   `--merge`: The directory containing the `*_rasterized.pdf` files to be merged.
+*   `--merge-output`: Specify a custom path for the final merged PDF.
+*   `--no-recreate-bookmarks`: Disables the automatic recreation of bookmarks from the original structure.
+
+## Configuration
+
+You can configure the paths to the Ghostscript and ImageMagick executables by editing the `config.json` file:
+
+```json
+{
+    "gs_path": "gs",
+    "magick_path": "magick"
+}
+```
+
+If the executables are in your system's PATH, the default values should work. Otherwise, provide the full absolute path to `gs` and `magick`. The GUI also provides a settings window to configure these paths.
