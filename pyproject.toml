@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdf-processor-suite"
+version = "1.0.0"
+authors = [
+  { name="Kush Chou", email="author@example.com" },
+]
+description = "A suite of tools to split, rasterize, and manage PDF files."
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "pypdf",
+]
+
+[project.scripts]
+pdf-processor = "pdf_split_rasterize:main_cli"
+move-files-up = "move_files_up:main_cli"
