@@ -242,22 +242,22 @@ def get_bookmark_structure_nested(pdf_path: Path) -> List[Dict]:
         return []
 
 
-def split_pdf_recursive(reader, bookmarks, current_path, dry_run=False, cancel_event=None, pause_event=None, max_split_level=0):
+def split_pdf_recursive(reader, bookmarks, current_path, dry_run=False, cancel_event=None, pause_event=None, max_split_level=0, create_parent_pdfs=False):
     """
     Recursively splits the PDF based on the NESTED bookmark structure.
-    Creates folders for L1, L2, and L3 with children.
-    Creates PDFs for all bookmarks with valid page ranges.
-    If max_split_level > 0, it will not process bookmarks deeper than that level.
+    If max_split_level is set, it rasterizes bookmarks at that level, or any bookmark
+    at a lower level that doesn't have children. It skips creating PDFs for parent
+    bookmarks that have children, processing them recursively instead.
     """
     num_pages_total = len(reader.pages)
 
     if not bookmarks:
-         logging.debug(f"No bookmarks to process at path: {current_path}")
-         return
+        logging.debug(f"No bookmarks to process at path: {current_path}")
+        return
 
     for bookmark in bookmarks:
         if pause_event:
-            pause_event.wait() # This will block if pause_event is cleared
+            pause_event.wait()
 
         if cancel_event and cancel_event.is_set():
             logging.warning("Cancellation detected in split_pdf_recursive. Aborting split.")
@@ -266,11 +266,10 @@ def split_pdf_recursive(reader, bookmarks, current_path, dry_run=False, cancel_e
         level = bookmark["level"]
         title = bookmark["title"]
         start_page = bookmark["page_index"]
-        end_page = bookmark.get("end_page_index", start_page)  # Default to start_page if missing
+        end_page = bookmark.get("end_page_index", start_page)
         children = bookmark.get("children", [])
 
-        # If a max level is set and the current bookmark's level exceeds it, we stop here.
-        # We don't process this bookmark or any of its children.
+        # Stop processing if the current level exceeds the max split level
         if max_split_level > 0 and level > max_split_level:
             logging.info(f"Skipping bookmark '{title}' at level {level} (max level is {max_split_level}).")
             continue
@@ -281,67 +280,60 @@ def split_pdf_recursive(reader, bookmarks, current_path, dry_run=False, cancel_e
             logging.warning(f"Skipping bookmark with empty title at level {level}, page {start_page + 1}")
             continue
 
-        # Sanitize the title for use in filenames
-        safe_title = sanitize_filename(title) # e.g., "Chapter 1. Introduction"
-        
-        # Determine output paths
-        # Path for the PDF file for this bookmark, e.g., ".../Chapter 1. Introduction.pdf"
+        safe_title = sanitize_filename(title)
         output_pdf_path = current_path / f"{safe_title}.pdf"
-        # Path for the directory if this bookmark has children, e.g., ".../Chapter 1. Introduction/"
         output_dir_path = current_path / safe_title
 
-        # Check if we should create a PDF for this bookmark
-        # Create PDF if it has a valid page range and is not a folder-only level
+        # Determine if a PDF should be created for the current bookmark
         is_valid_range = not (start_page < 0 or end_page >= num_pages_total or start_page > end_page)
-        
+        create_pdf_for_this_bookmark = False
+
         if is_valid_range:
+            if create_parent_pdfs:
+                # In parent-inclusive mode, always create a PDF if the page range is valid.
+                create_pdf_for_this_bookmark = True
+            else:
+                # In leaf-only mode, only create a PDF for leaves or at the max split level.
+                create_pdf_for_this_bookmark = not children or (max_split_level > 0 and level == max_split_level)
+
+        if create_pdf_for_this_bookmark:
             if dry_run:
                 logging.info(f"[DRY RUN] Would extract pages {start_page + 1} to {end_page + 1} for L{level} PDF: {output_pdf_path}")
             else:
-                # Create PDF for this bookmark
                 logging.info(f"  Extracting pages {start_page + 1} to {end_page + 1} for L{level} PDF: {output_pdf_path}")
-            writer = PdfWriter()
-            pages_added_count = 0
-            
-            try:
-                for page_num in range(start_page, end_page + 1):
-                    try:
+                writer = PdfWriter()
+                pages_added_count = 0
+                try:
+                    for page_num in range(start_page, end_page + 1):
                         writer.add_page(reader.pages[page_num])
                         pages_added_count += 1
-                    except IndexError:
-                        logging.error(f"    Page index {page_num} out of bounds ({num_pages_total} pages total).")
-                        break
-                    except Exception as e:
-                        logging.error(f"    Error adding page {page_num + 1}: {e}")
-                        break
 
-                if pages_added_count > 0:
-                    try:
+                    if pages_added_count > 0:
                         output_pdf_path.parent.mkdir(parents=True, exist_ok=True)
                         with open(output_pdf_path, "wb") as f_out:
                             writer.write(f_out)
                         logging.info(f"    Successfully created PDF: {output_pdf_path}")
-                    except (IOError, OSError) as e:
-                        logging.error(f"    Failed to write PDF {output_pdf_path}: {e}")
-                else:
-                    logging.warning(f"    No pages added for '{title}' (Range: {start_page+1}-{end_page+1}).")
-            except Exception as e:
-                logging.error(f"    Error creating PDF for '{title}': {e}")
+                    else:
+                        logging.warning(f"    No pages added for '{title}' (Range: {start_page+1}-{end_page+1}).")
+                except Exception as e:
+                    logging.error(f"    Error creating PDF for '{title}': {e}")
 
-        # Handle folder creation for levels that need it
-        if children or level <= 2: # Always create folders for L1/L2, and for L3+ with children
+        # --- Recursive Step ---
+        # If the bookmark has children AND we have NOT reached the max_split_level,
+        # then we need to go deeper. We create a directory for its children and recurse.
+        # We do NOT create a PDF for this parent bookmark.
+        if children and (max_split_level == 0 or level < max_split_level):
             if dry_run:
-                logging.info(f"[DRY RUN] Would create directory: {output_dir_path}")
+                logging.info(f"[DRY RUN] Would create directory for children: {output_dir_path}")
             else:
                 try:
                     output_dir_path.mkdir(parents=True, exist_ok=True)
-                    if children or level <= 2: # Only log for actual folders we're creating
-                        logging.info(f"Created directory: {output_dir_path}")
+                    logging.info(f"Created directory for children: {output_dir_path}")
                 except Exception as e:
                     logging.error(f"    Failed to create directory {output_dir_path}: {e}")
-            # Process children if any, always passing the dry_run state
-            if children:
-                split_pdf_recursive(reader, children, output_dir_path, dry_run=dry_run, cancel_event=cancel_event, pause_event=pause_event, max_split_level=max_split_level)
+            
+            # Recurse into the children
+            split_pdf_recursive(reader, children, output_dir_path, dry_run=dry_run, cancel_event=cancel_event, pause_event=pause_event, max_split_level=max_split_level, create_parent_pdfs=create_parent_pdfs)
 
 
 
@@ -718,63 +710,8 @@ def generate_html_report(report_data, output_path):
     except Exception as e:
         logging.error(f"Failed to write HTML report: {e}")
 
-def main_entry(args, progress_callback=None, cancel_event=None, pause_event=None) -> tuple[bool, list, dict]:
-    """
-    Main entry point that can be called from the GUI.
-    
-    Args:
-        args: Should have attributes: input, output, resolution, keep_originals
-        progress_callback: Optional function to report progress (value, total)
-        cancel_event: Optional threading.Event to signal cancellation.
-    Returns:
-        A tuple of (overall_success, list_of_errors, report_data_dict)
-    """
-    dry_run = getattr(args, 'dry_run', False) # Safely get the dry_run flag
-
-    # --- Merge Mode ---
-    if getattr(args, 'merge', None):
-        merge_dir = Path(args.merge)
-        # Default output is in the parent of the merge dir
-        output_file = merge_dir.parent / f"{merge_dir.name}_merged.pdf"
-        if getattr(args, 'merge_output', None):
-            output_file = Path(args.merge_output)
-        recreate_bmarks = not getattr(args, 'no_recreate_bookmarks', False)
-        
-        report_data = {
-            'operation_type': 'merge',
-            'start_time': time.time(),
-            'input_dir': str(merge_dir),
-            'output_file': str(output_file),
-            'success': [],
-            'failures': [],
-            'total_files_processed': 0
-        }
-
-        success = merge_rasterized_pdfs(
-            directory=merge_dir,
-            output_file=output_file,
-            dry_run=dry_run,
-            recreate_bookmarks=recreate_bmarks,
-            progress_callback=progress_callback,
-            cancel_event=cancel_event,
-            pause_event=pause_event,
-            report_data=report_data
-        )
-        return success, report_data.get('failures', []), report_data
-
-    # --- Split & Rasterize Mode ---
-    input_pdf_path = args.input
-    output_base_dir = args.output
-    rasterize_resolution = args.resolution
-    cleanup_original_splits = not args.keep_originals
-    num_workers = getattr(args, 'workers', None)
-    gs_path = getattr(args, 'gs_path', 'gs')
-    max_split_level = getattr(args, 'max_split_level', 0)
-    magick_path = getattr(args, 'magick_path', 'magick')
-
+def run_split_rasterize(input_pdf_path, output_base_dir, rasterize_resolution, cleanup_original_splits, num_workers, gs_path, magick_path, max_split_level, flatten_output, html_report, dry_run, create_parent_pdfs=False, progress_callback=None, cancel_event=None, pause_event=None):
     errors = []
-
-    # --- Report Data Collection ---
     report_data = {
         'operation_type': 'split_rasterize',
         'start_time': time.time(),
@@ -782,13 +719,11 @@ def main_entry(args, progress_callback=None, cancel_event=None, pause_event=None
         'output_dir': str(output_base_dir),
         'success': [],
         'failures': [],
-        'total_files_processed': 0,        
+        'total_files_processed': 0,
         'gs_path': gs_path,
         'magick_path': magick_path
-    
     }
 
-    # --- Start Processing ---
     if not input_pdf_path.is_file():
         msg = f"Input PDF not found: {input_pdf_path}"
         logging.error(msg)
@@ -796,7 +731,6 @@ def main_entry(args, progress_callback=None, cancel_event=None, pause_event=None
         report_data['failures'].append(msg)
         return False, errors, report_data
 
-    # --- ADDED: Check for Ghostscript and ImageMagick executables ---
     if not shutil.which(gs_path):
         msg = f"Ghostscript executable not found at: {gs_path}. Please check your settings or PATH."
         logging.error(msg)
@@ -809,10 +743,9 @@ def main_entry(args, progress_callback=None, cancel_event=None, pause_event=None
         errors.append(msg)
         report_data['failures'].append(msg)
         return False, errors, report_data
-    # Ensure output directory exists
+
     output_base_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Get Nested Bookmark Structure (with end pages calculated)
     logging.info(f"Processing PDF: {input_pdf_path}")
     logging.info("Extracting nested bookmark structure...")
     nested_bookmarks = get_bookmark_structure_nested(input_pdf_path)
@@ -824,14 +757,11 @@ def main_entry(args, progress_callback=None, cancel_event=None, pause_event=None
         report_data['failures'].append(msg)
         return False, errors, report_data
 
-    # --- ADDED: Save bookmarks to JSON ---
     save_bookmarks_to_json(nested_bookmarks, output_base_dir / "_bookmarks.json", dry_run)
 
-    # 2. Split PDF based on Nested Bookmarks
     logging.info(f"Splitting PDF into directory structure under: {output_base_dir}")
     try:
         reader = PdfReader(input_pdf_path)
-        # Decrypt if necessary (check done in get_bookmark_structure_nested, but reader is reopened here)
         if reader.is_encrypted:
             try:
                 reader.decrypt("")
@@ -845,64 +775,49 @@ def main_entry(args, progress_callback=None, cancel_event=None, pause_event=None
 
         if cancel_event and cancel_event.is_set(): return False, errors, report_data
 
-        # Start recursive splitting from the base output directory
-        split_pdf_recursive(reader, nested_bookmarks, output_base_dir, dry_run=dry_run, cancel_event=cancel_event, pause_event=pause_event, max_split_level=max_split_level)
-        
+        split_pdf_recursive(reader, nested_bookmarks, output_base_dir, dry_run=dry_run, cancel_event=cancel_event, pause_event=pause_event, max_split_level=max_split_level, create_parent_pdfs=create_parent_pdfs)
+
     except Exception as e:
         msg = f"Error during PDF splitting: {e}"
         logging.error(msg, exc_info=True)
         errors.append(msg)
         report_data['failures'].append(msg)
         return False, errors, report_data
-    
+
     if cancel_event and cancel_event.is_set():
         logging.warning("Cancellation detected after splitting, before rasterization. Aborting.")
         return False, errors, report_data
 
-    # 3. Recursively Find and Rasterize Split PDFs
     logging.info("Starting rasterization process...")
     all_pdfs_found = list(output_base_dir.rglob("*.pdf"))
-
-    # Filter out already rasterized files before processing
-    split_pdfs_to_process = [
-        p for p in all_pdfs_found if not p.stem.endswith("_rasterized")
-    ]
+    split_pdfs_to_process = [p for p in all_pdfs_found if not p.stem.endswith("_rasterized")]
 
     if not split_pdfs_to_process:
         logging.warning("No split PDFs found in the output directory to rasterize.")
         return True, errors, report_data
-        
+
     logging.info(f"Found {len(split_pdfs_to_process)} split PDFs to rasterize. Starting parallel processing...")
     success_count, fail_count = 0, 0
-
-    # Use a ProcessPoolExecutor for parallel processing.
-    # It will use os.cpu_count() workers by default, which is ideal for this CPU-bound task.
     report_data['total_files_processed'] = len(split_pdfs_to_process)
+
     with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
-        # Submit all rasterization tasks. Pass paths as strings and dry_run for pickling safety.
         future_to_pdf = {
             executor.submit(rasterize_worker, str(pdf_path), rasterize_resolution, cleanup_original_splits, dry_run, gs_executable=gs_path, magick_executable=magick_path): pdf_path
             for pdf_path in split_pdfs_to_process
         }
-
         total_tasks = len(future_to_pdf)
         completed_tasks = 0
-
         for future in concurrent.futures.as_completed(future_to_pdf):
             pdf_path = future_to_pdf[future]
             completed_tasks += 1
-
             if progress_callback:
                 progress_callback(completed_tasks, total_tasks)
-
             if pause_event:
                 pause_event.wait()
-
             if cancel_event and cancel_event.is_set():
                 logging.warning("Cancellation detected during rasterization. Shutting down workers.")
                 executor.shutdown(wait=False)
                 return False, errors, report_data
-
             try:
                 success, original_path_str = future.result()
                 if success:
@@ -921,20 +836,89 @@ def main_entry(args, progress_callback=None, cancel_event=None, pause_event=None
                 fail_count += 1
 
     logging.info(f"Rasterization complete. Success: {success_count}, Failed: {fail_count}")
-    
-    # --- ADDED: Flatten directory if requested ---
-    if getattr(args, 'flatten_output', False):
+
+    if flatten_output:
         if dry_run:
             logging.info(f"[DRY RUN] Would flatten the output directory: {output_base_dir}")
         elif fail_count == 0:
             _flatten_directory(output_base_dir)
         else:
             logging.warning("Skipping directory flattening due to rasterization failures.")
-    
-    if getattr(args, 'html_report', None):
-        generate_html_report(report_data, args.html_report)
+
+    if html_report:
+        generate_html_report(report_data, html_report)
 
     return fail_count == 0, errors, report_data
+
+def run_merge(merge_dir, output_file, recreate_bookmarks, dry_run, progress_callback=None, cancel_event=None, pause_event=None):
+    report_data = {
+        'operation_type': 'merge',
+        'start_time': time.time(),
+        'input_dir': str(merge_dir),
+        'output_file': str(output_file),
+        'success': [],
+        'failures': [],
+        'total_files_processed': 0
+    }
+    success = merge_rasterized_pdfs(
+        directory=merge_dir,
+        output_file=output_file,
+        dry_run=dry_run,
+        recreate_bookmarks=recreate_bookmarks,
+        progress_callback=progress_callback,
+        cancel_event=cancel_event,
+        pause_event=pause_event,
+        report_data=report_data
+    )
+    return success, report_data.get('failures', []), report_data
+
+def main_entry(args, progress_callback=None, cancel_event=None, pause_event=None) -> tuple[bool, list, dict]:
+    """
+    Main entry point that can be called from the GUI.
+    
+    Args:
+        args: Should have attributes: input, output, resolution, keep_originals
+        progress_callback: Optional function to report progress (value, total)
+        cancel_event: Optional threading.Event to signal cancellation.
+    Returns:
+        A tuple of (overall_success, list_of_errors, report_data_dict)
+    """
+    dry_run = getattr(args, 'dry_run', False)
+
+    if getattr(args, 'merge', None):
+        merge_dir = Path(args.merge)
+        output_file = merge_dir.parent / f"{merge_dir.name}_merged.pdf"
+        if getattr(args, 'merge_output', None):
+            output_file = Path(args.merge_output)
+        recreate_bmarks = not getattr(args, 'no_recreate_bookmarks', False)
+        
+        return run_merge(
+            merge_dir=merge_dir,
+            output_file=output_file,
+            recreate_bookmarks=recreate_bmarks,
+            dry_run=dry_run,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event,
+            pause_event=pause_event
+        )
+    else:
+        return run_split_rasterize(
+            input_pdf_path=args.input,
+            output_base_dir=args.output,
+            rasterize_resolution=args.resolution,
+            cleanup_original_splits=not args.keep_originals,
+            num_workers=getattr(args, 'workers', None),
+            gs_path=getattr(args, 'gs_path', 'gs'),
+            magick_path=getattr(args, 'magick_path', 'magick'),
+            max_split_level=getattr(args, 'max_split_level', 0),
+            flatten_output=getattr(args, 'flatten_output', False),
+            html_report=getattr(args, 'html_report', None),
+            dry_run=dry_run,
+            create_parent_pdfs=getattr(args, 'create_parent_pdfs', False),
+            progress_callback=progress_callback,
+            cancel_event=cancel_event,
+            pause_event=pause_event
+        )
 
 def main_cli():
     parser = argparse.ArgumentParser(description="Split, rasterize, and merge PDFs based on bookmarks.")
@@ -956,6 +940,7 @@ def main_cli():
     split_group.add_argument("-w", "--workers", type=int, default=None, help="Number of parallel processes for rasterization (default: all CPU cores).")
     split_group.add_argument("--flatten-output", action="store_true", help="Move all output files into a single flat directory.")
     split_group.add_argument("--max-split-level", type=int, default=0, help="Maximum bookmark level to split. 0 for unlimited (default).")
+    split_group.add_argument("--create-parent-pdfs", action="store_true", help="Also create PDFs for parent bookmarks that contain children.")
 
     # --- Arguments for Merge Mode ---
     merge_group = parser.add_argument_group('Merging Options')

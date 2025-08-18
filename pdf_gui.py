@@ -96,37 +96,42 @@ class Worker(QRunnable):
             logger.removeHandler(handler) # Clean up the handler
             self.signals.finished.emit() # Signal that the worker is done
 
-def run_split_and_rasterize_wrapper(input_pdf, output_dir, dpi, keep_originals, dry_run, workers, config, flatten_output, max_split_level, signals, cancel_event, pause_event):
+def run_split_and_rasterize_wrapper(input_pdf, output_dir, dpi, keep_originals, dry_run, workers, config, flatten_output, max_split_level, create_parent_pdfs, signals, cancel_event, pause_event):
     """Wrapper to call the main script's entry point for splitting."""
-    class Args: pass
-    args = Args() # type: ignore
-    args.input = Path(input_pdf) # type: ignore
-    args.output = Path(output_dir) # type: ignore
-    args.resolution = dpi # type: ignore
-    args.keep_originals = keep_originals # type: ignore
-    args.dry_run = dry_run # type: ignore
-    args.workers = workers # type: ignore
-    args.gs_path = config.get('gs_path', 'gs') # type: ignore
-    args.magick_path = config.get('magick_path', 'magick') # type: ignore
-    args.flatten_output = flatten_output # type: ignore
-    args.max_split_level = max_split_level # type: ignore
-    args.html_report = None # type: ignore
-
-    _, _, report_data = pdf_split_rasterize.main_entry(args, lambda v, t: signals.progress.emit(v, t), cancel_event, pause_event)
+    _, _, report_data = pdf_split_rasterize.run_split_rasterize(
+        input_pdf_path=Path(input_pdf),
+        output_base_dir=Path(output_dir),
+        rasterize_resolution=dpi,
+        cleanup_original_splits=not keep_originals,
+        num_workers=workers,
+        gs_path=config.get('gs_path', 'gs'),
+        magick_path=config.get('magick_path', 'magick'),
+        max_split_level=max_split_level,
+        flatten_output=flatten_output,
+        html_report=None,
+        dry_run=dry_run,
+        create_parent_pdfs=create_parent_pdfs,
+        progress_callback=lambda v, t: signals.progress.emit(v, t),
+        cancel_event=cancel_event,
+        pause_event=pause_event
+    )
     if not cancel_event.is_set():
         signals.summary.emit(report_data)
     signals.cleanup_ui.emit('split')
 
+
 def run_merge_wrapper(merge_dir, recreate_bookmarks, config, signals, cancel_event, pause_event):
     """Wrapper to call the main script's entry point for merging."""
-    class Args: pass
-    args = Args() # type: ignore
-    args.merge = Path(merge_dir) # type: ignore
-    args.merge_output = None # type: ignore
-    args.dry_run = False # type: ignore
-    args.no_recreate_bookmarks = not recreate_bookmarks # type: ignore
-
-    _, _, report_data = pdf_split_rasterize.main_entry(args, lambda v, t: signals.progress.emit(v, t), cancel_event, pause_event)
+    output_file = Path(merge_dir).parent / f"{Path(merge_dir).name}_merged.pdf"
+    _, _, report_data = pdf_split_rasterize.run_merge(
+        merge_dir=Path(merge_dir),
+        output_file=output_file,
+        recreate_bookmarks=recreate_bookmarks,
+        dry_run=False,
+        progress_callback=lambda v, t: signals.progress.emit(v, t),
+        cancel_event=cancel_event,
+        pause_event=pause_event
+    )
     if not cancel_event.is_set():
         signals.summary.emit(report_data)
     signals.cleanup_ui.emit('merge')
@@ -251,14 +256,17 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(self.dry_run_chk, 2, 0, 1, 2)
         settings_layout.addWidget(self.flatten_output_chk, 3, 0, 1, 4)
 
+        self.create_parent_pdfs_chk = QCheckBox("Create PDFs for parent bookmarks")
+        settings_layout.addWidget(self.create_parent_pdfs_chk, 4, 0, 1, 4)
+
         self.limit_level_chk = QCheckBox("Limit splitting to bookmark level:")
         self.max_level_spinbox = QSpinBox()
         self.max_level_spinbox.setRange(1, 20)
         self.max_level_spinbox.setValue(3)
         self.max_level_spinbox.setEnabled(False)
         self.limit_level_chk.toggled.connect(self.max_level_spinbox.setEnabled)
-        settings_layout.addWidget(self.limit_level_chk, 4, 0, 1, 2)
-        settings_layout.addWidget(self.max_level_spinbox, 4, 2, 1, 2)
+        settings_layout.addWidget(self.limit_level_chk, 5, 0, 1, 2)
+        settings_layout.addWidget(self.max_level_spinbox, 5, 2, 1, 2)
         layout.addWidget(settings_group)
 
         button_layout = QHBoxLayout()
@@ -347,7 +355,7 @@ class MainWindow(QMainWindow):
                         input_pdf, output_dir, self.dpi_spinbox.value(),
                         self.keep_originals_chk.isChecked(), self.dry_run_chk.isChecked(),
                         self.workers_spinbox.value(), CONFIG, self.flatten_output_chk.isChecked(),
-                        max_split_level) # type: ignore
+                        max_split_level, self.create_parent_pdfs_chk.isChecked()) # type: ignore
         self.connect_worker_signals(worker)
         self.threadpool.start(worker)
 
