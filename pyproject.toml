@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "pdf-processor-suite"
 version = "1.0.0"
 authors = [
-  { name="Kush Chou", email="author@example.com" },
+  { name="Kush Chou", email="kushagra26407@gmail.com" },
 ]
 description = "A suite of tools to split, rasterize, and manage PDF files."
 readme = "README.md"

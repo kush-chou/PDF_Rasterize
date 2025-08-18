@@ -337,8 +337,8 @@ def split_pdf_recursive(reader, bookmarks, current_path, dry_run=False, cancel_e
 
 
 
-def rasterize_pdf(input_pdf, output_pdf, resolution=300, gs_executable="gs", magick_executable="magick"):
-    """Rasterizes a single PDF file using Ghostscript and ImageMagick."""
+def rasterize_pdf(input_pdf, output_pdf, resolution=300, gs_executable="gs"):
+    """Rasterizes a single PDF file using Ghostscript."""
     # --- Check if input PDF exists and is not empty ---
     if not input_pdf.is_file():
         logging.error(f"Rasterize input file not found: {input_pdf}")
@@ -349,95 +349,64 @@ def rasterize_pdf(input_pdf, output_pdf, resolution=300, gs_executable="gs", mag
         return False
 
     logging.info(f"Rasterizing: {input_pdf} -> {output_pdf}")
-    # Use a temporary directory for intermediate PNGs
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_png_pattern = Path(temp_dir) / "temp_page_%04d.png"
 
-        gs_command = [
-            gs_executable,
-            "-sDEVICE=png16m", # Output device (color PNG)
-            f"-r{resolution}", # Set resolution
-            "-o", str(temp_png_pattern), # Output pattern for PNGs
-            "-dQUIET",       # Suppress informational messages
-            "-dBATCH",       # Exit after processing
-            "-dNOPAUSE",     # Don't pause between pages
-            "-dSAFER",       # Security precaution
-            # "-dTextAlphaBits=4", # Optional: Improve text anti-aliasing if needed
-            # "-dGraphicsAlphaBits=4", # Optional: Improve graphics anti-aliasing
-            str(input_pdf)   # Input PDF file
-        ]
+    gs_command = [
+        gs_executable,
+        '-sDEVICE=pdfwrite',
+        '-dCompatibilityLevel=1.4',
+        f'-r{resolution}',
+        '-dDownsampleColorImages=true',
+        f'-dColorImageResolution={resolution}',
+        '-dNOPAUSE',
+        '-dQUIET',
+        '-dBATCH',
+        '-sOutputFile=' + str(output_pdf),
+        str(input_pdf)
+    ]
 
-        try:
-            # Step 1: Convert PDF to PNGs using Ghostscript
-            logging.debug(f"Running Ghostscript: {' '.join(gs_command)}")
-            gs_result = subprocess.run(gs_command, capture_output=True, text=True, check=False, timeout=300) # Add timeout (e.g., 5 minutes)
-            if gs_result.returncode != 0:
-                error_msg = f"Ghostscript failed for {input_pdf}. RC: {gs_result.returncode}"
-                # Include first 500 chars of stderr in the main error message
-                if gs_result.stderr:
-                    error_msg += f". Stderr: {gs_result.stderr[:500]}"
-                else:
-                    error_msg += ". No stderr output."
+    try:
+        # Step 1: Convert PDF to PNGs using Ghostscript
+        logging.debug(f"Running Ghostscript: {' '.join(gs_command)}")
+        gs_result = subprocess.run(gs_command, capture_output=True, text=True, check=False, timeout=300) # Add timeout (e.g., 5 minutes)
+        if gs_result.returncode != 0:
+            error_msg = f"Ghostscript failed for {input_pdf}. RC: {gs_result.returncode}"
+            # Include first 500 chars of stderr in the main error message
+            if gs_result.stderr:
+                error_msg += f". Stderr: {gs_result.stderr[:500]}"
+            else:
+                error_msg += ". No stderr output."
 
-                logging.error(error_msg)
-                # Log stdout as well, might contain useful info despite QUIET
-                logging.debug(f"Ghostscript stdout: {gs_result.stdout[:500]}")
-                return False
-            logging.debug("Ghostscript finished.")
-
-            # Step 2: Check if PNGs were created and combine them using ImageMagick
-            # Use Path.glob which handles various path formats
-            png_files = sorted(list(Path(temp_dir).glob("temp_page_*.png"))) # Sort numerically
-
-            if not png_files:
-                logging.error(f"Ghostscript produced no PNG files in {temp_dir} for {input_pdf}.")
-                # Log gs output again for debugging this specific case
-                logging.debug(f"Ghostscript stdout: {gs_result.stdout[:500]}")
-                logging.debug(f"Ghostscript stderr: {gs_result.stderr[:500]}")
-                return False
-            logging.debug(f"Found {len(png_files)} PNG files to process.")
-
-            # Use the explicit file list for ImageMagick as it's generally more robust
-            magick_command_explicit = [magick_executable] + [str(f) for f in png_files] + ["-quality", "90", str(output_pdf)]
-            logging.debug(f"Running ImageMagick (explicit): magick ... {len(png_files)} files ...")
-            # Add timeout for ImageMagick as well
-            magick_result = subprocess.run(magick_command_explicit, capture_output=True, text=True, check=False, timeout=300)
-
-            if magick_result.returncode != 0:
-                error_msg = f"ImageMagick failed for {input_pdf}. RC: {magick_result.returncode}"
-                # Include first 500 chars of stderr
-                if magick_result.stderr:
-                    error_msg += f". Stderr: {magick_result.stderr[:500]}"
-                else:
-                    error_msg += ". No stderr output."
-                logging.error(error_msg)
-
-                logging.debug(f"ImageMagick stdout: {magick_result.stdout[:500]}")
-                return False # Failed conversion
-            logging.debug("ImageMagick finished.")
-
-            # Final check: Ensure output PDF exists and has content
-            if not output_pdf.exists() or output_pdf.stat().st_size == 0:
-                logging.error(f"Rasterized PDF {output_pdf} was not created or is empty after ImageMagick step.")
-                return False
-
-            # If we reach here, rasterization was successful
-            return True
-
-        except FileNotFoundError as e:
-            # Check specifically for gs or magick and give a clearer message
-            missing_cmd = gs_executable if gs_executable in str(e) else magick_executable
-            logging.error(f"Command '{missing_cmd}' not found: {e}. Make sure Ghostscript and ImageMagick are installed and in your system's PATH.")
+            logging.error(error_msg)
+            # Log stdout as well, might contain useful info despite QUIET
+            logging.debug(f"Ghostscript stdout: {gs_result.stdout[:500]}")
             return False
-        except subprocess.TimeoutExpired as e:
-             # Be more specific about which command timed out
-             logging.error(f"Rasterization step '{e.cmd}' timed out for {input_pdf}. The file might be too complex or large.")
-             return False
-        except Exception as e:
-            logging.error(f"An unexpected error occurred during rasterization of {input_pdf}: {e}", exc_info=True)
+        logging.debug("Ghostscript finished.")
+
+        # Final check: Ensure output PDF exists and has content
+        if not output_pdf.exists() or output_pdf.stat().st_size == 0:
+            logging.error(f"Rasterized PDF {output_pdf} was not created or is empty after Ghostscript step.")
+            # Log gs output again for debugging this specific case
+            logging.debug(f"Ghostscript stdout: {gs_result.stdout[:500]}")
+            logging.debug(f"Ghostscript stderr: {gs_result.stderr[:500]}")
             return False
 
-def rasterize_worker(split_pdf_path_str, rasterize_resolution, cleanup_original_splits, dry_run=False, gs_executable="gs", magick_executable="magick"):
+        # If we reach here, rasterization was successful
+        return True
+
+    except FileNotFoundError as e:
+        # Check specifically for gs or magick and give a clearer message
+        missing_cmd = gs_executable
+        logging.error(f"Command '{missing_cmd}' not found: {e}. Make sure Ghostscript is installed and in your system's PATH.")
+        return False
+    except subprocess.TimeoutExpired as e:
+         # Be more specific about which command timed out
+         logging.error(f"Rasterization step '{e.cmd}' timed out for {input_pdf}. The file might be too complex or large.")
+         return False
+    except Exception as e:
+        logging.error(f"An unexpected error occurred during rasterization of {input_pdf}: {e}", exc_info=True)
+        return False
+
+def rasterize_worker(split_pdf_path_str, rasterize_resolution, cleanup_original_splits, dry_run=False, gs_executable="gs"):
     """
     Worker function for parallel rasterization. Takes string paths to be pickle-able.
     Returns a tuple (success: bool, original_path: str).
@@ -453,7 +422,7 @@ def rasterize_worker(split_pdf_path_str, rasterize_resolution, cleanup_original_
         return (True, str(split_pdf_path)) # Simulate success in dry run
 
     # Actual rasterization
-    success = rasterize_pdf(split_pdf_path, rasterized_pdf_path, resolution=rasterize_resolution, gs_executable=gs_executable, magick_executable=magick_executable)    
+    success = rasterize_pdf(split_pdf_path, rasterized_pdf_path, resolution=rasterize_resolution, gs_executable=gs_executable)
     if success:
         if cleanup_original_splits:
             try:
@@ -702,7 +671,7 @@ def generate_html_report(report_data, output_path):
         </ul>
     </body>
     </html>
-    """
+    """)
     try:
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(html)
@@ -710,7 +679,7 @@ def generate_html_report(report_data, output_path):
     except Exception as e:
         logging.error(f"Failed to write HTML report: {e}")
 
-def run_split_rasterize(input_pdf_path, output_base_dir, rasterize_resolution, cleanup_original_splits, num_workers, gs_path, magick_path, max_split_level, flatten_output, html_report, dry_run, create_parent_pdfs=False, progress_callback=None, cancel_event=None, pause_event=None):
+def run_split_rasterize(input_pdf_path, output_base_dir, rasterize_resolution, cleanup_original_splits, num_workers, gs_path, max_split_level, flatten_output, html_report, dry_run, create_parent_pdfs=False, progress_callback=None, cancel_event=None, pause_event=None):
     errors = []
     report_data = {
         'operation_type': 'split_rasterize',
@@ -720,8 +689,7 @@ def run_split_rasterize(input_pdf_path, output_base_dir, rasterize_resolution, c
         'success': [],
         'failures': [],
         'total_files_processed': 0,
-        'gs_path': gs_path,
-        'magick_path': magick_path
+        'gs_path': gs_path
     }
 
     if not input_pdf_path.is_file():
@@ -733,12 +701,6 @@ def run_split_rasterize(input_pdf_path, output_base_dir, rasterize_resolution, c
 
     if not shutil.which(gs_path):
         msg = f"Ghostscript executable not found at: {gs_path}. Please check your settings or PATH."
-        logging.error(msg)
-        errors.append(msg)
-        report_data['failures'].append(msg)
-        return False, errors, report_data
-    if not shutil.which(magick_path):
-        msg = f"ImageMagick executable not found at: {magick_path}. Please check your settings or PATH."
         logging.error(msg)
         errors.append(msg)
         report_data['failures'].append(msg)
@@ -802,7 +764,7 @@ def run_split_rasterize(input_pdf_path, output_base_dir, rasterize_resolution, c
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
         future_to_pdf = {
-            executor.submit(rasterize_worker, str(pdf_path), rasterize_resolution, cleanup_original_splits, dry_run, gs_executable=gs_path, magick_executable=magick_path): pdf_path
+            executor.submit(rasterize_worker, str(pdf_path), rasterize_resolution, cleanup_original_splits, dry_run, gs_executable=gs_path): pdf_path
             for pdf_path in split_pdfs_to_process
         }
         total_tasks = len(future_to_pdf)
@@ -874,7 +836,7 @@ def run_merge(merge_dir, output_file, recreate_bookmarks, dry_run, progress_call
 
 def main_entry(args, progress_callback=None, cancel_event=None, pause_event=None) -> tuple[bool, list, dict]:
     """
-    Main entry point that can be called from the GUI.
+    Main entry point that can be called from the GUI. 
     
     Args:
         args: Should have attributes: input, output, resolution, keep_originals
@@ -909,7 +871,6 @@ def main_entry(args, progress_callback=None, cancel_event=None, pause_event=None
             cleanup_original_splits=not args.keep_originals,
             num_workers=getattr(args, 'workers', None),
             gs_path=getattr(args, 'gs_path', 'gs'),
-            magick_path=getattr(args, 'magick_path', 'magick'),
             max_split_level=getattr(args, 'max_split_level', 0),
             flatten_output=getattr(args, 'flatten_output', False),
             html_report=getattr(args, 'html_report', None),
@@ -952,7 +913,6 @@ def main_cli():
     general_group = parser.add_argument_group('General Options')
     general_group.add_argument("--dry-run", action="store_true", help="Show what would happen without making changes.")
     general_group.add_argument("--gs-path", type=str, default="gs", help="Path to the Ghostscript (gs) executable.")
-    general_group.add_argument("--magick-path", type=str, default="magick", help="Path to the ImageMagick (magick) executable.")
     general_group.add_argument("--html-report", type=Path, help="Generate a final HTML summary report at the specified path.")
 
     args = parser.parse_args()

@@ -35,7 +35,7 @@ Ensure that the executables for `gs` (Ghostscript) and `magick` (ImageMagick) ar
 2.  **Install Python dependencies:**
     The project's dependencies are listed in `pyproject.toml`. The main dependency is `pypdf`. The GUI also requires `PyQt6`. You can install them using pip:
     ```bash
-    pip install pypdf PyQt6
+    ~~pip install pypdf PyQt6~~
     ```
 
 ## Usage

@@ -6,11 +6,13 @@ import threading
 import logging
 from pathlib import Path
 
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLineEdit,
-                             QPushButton, QFileDialog, QVBoxLayout, QHBoxLayout,
-                             QMessageBox, QTabWidget, QTextEdit, QCheckBox,
-                             QSpinBox, QGroupBox, QProgressBar, QGridLayout,
-                             QDialog, QDialogButtonBox)
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QLabel, QLineEdit,
+    QPushButton, QFileDialog, QVBoxLayout, QHBoxLayout,
+    QMessageBox, QTabWidget, QTextEdit, QCheckBox,
+    QSpinBox, QGroupBox, QProgressBar, QGridLayout,
+    QDialog, QDialogButtonBox
+)
 from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool
 from PyQt6.QtGui import QFont, QAction, QIcon
 
@@ -34,8 +36,7 @@ def resource_path(relative_path):
 CONFIG_FILE = resource_path("config.json")
 
 CONFIG = {
-    "gs_path": "gs",
-    "magick_path": "magick"
+    "gs_path": "gs"
 }
 
 def load_config():
@@ -44,8 +45,10 @@ def load_config():
         try:
             with open(CONFIG_FILE, 'r') as f:
                 CONFIG.update(json.load(f))
-        except (json.JSONDecodeError, TypeError):
-            logging.warning("Could not read config.json. Using default paths.")
+        except json.JSONDecodeError:
+            logging.warning("Config file config.json is corrupted. Using default paths.")
+        except TypeError:
+            logging.warning("Invalid data type in config.json. Using default paths.")
 
 def save_config():
     with open(CONFIG_FILE, 'w') as f:
@@ -105,7 +108,6 @@ def run_split_and_rasterize_wrapper(input_pdf, output_dir, dpi, keep_originals, 
         cleanup_original_splits=not keep_originals,
         num_workers=workers,
         gs_path=config.get('gs_path', 'gs'),
-        magick_path=config.get('magick_path', 'magick'),
         max_split_level=max_split_level,
         flatten_output=flatten_output,
         html_report=None,
@@ -144,19 +146,12 @@ class SettingsWindow(QDialog):
         layout = QGridLayout(self)
 
         self.gs_path_edit = QLineEdit(CONFIG.get("gs_path"))
-        self.magick_path_edit = QLineEdit(CONFIG.get("magick_path"))
 
         layout.addWidget(QLabel("Ghostscript (gs) Path:"), 0, 0)
         layout.addWidget(self.gs_path_edit, 0, 1)
         gs_browse_btn = QPushButton("Browse")
         gs_browse_btn.clicked.connect(lambda: self.browse_file(self.gs_path_edit))
         layout.addWidget(gs_browse_btn, 0, 2)
-
-        layout.addWidget(QLabel("ImageMagick (magick) Path:"), 1, 0)
-        layout.addWidget(self.magick_path_edit, 1, 1)
-        magick_browse_btn = QPushButton("Browse")
-        magick_browse_btn.clicked.connect(lambda: self.browse_file(self.magick_path_edit))
-        layout.addWidget(magick_browse_btn, 1, 2)
 
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         button_box.accepted.connect(self.accept)
@@ -165,12 +160,10 @@ class SettingsWindow(QDialog):
 
     def browse_file(self, line_edit):
         path, _ = QFileDialog.getOpenFileName(self, "Select Executable")
-        if path:
-            line_edit.setText(path)
+        if path: line_edit.setText(path)
 
     def accept(self):
         CONFIG["gs_path"] = self.gs_path_edit.text()
-        CONFIG["magick_path"] = self.magick_path_edit.text()
         save_config()
         super().accept()
 
@@ -186,6 +179,7 @@ class MainWindow(QMainWindow):
         load_config()
 
     def create_ui(self):
+        """Create the main UI components."""
         self.create_menu()
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -209,6 +203,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.log_box)
 
     def create_menu(self):
+        """Create the main menu bar."""
         file_menu = self.menuBar().addMenu("&File") # type: ignore
         settings_action = QAction("Settings", self)
         settings_action.triggered.connect(lambda: SettingsWindow(self).exec())
@@ -220,6 +215,7 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
 
     def create_split_tab_ui(self):
+        """Create the UI for the Split & Rasterize tab."""
         layout = QVBoxLayout(self.split_tab)
         io_group = QGroupBox("Input and Output")
         io_layout = QGridLayout(io_group)
@@ -284,6 +280,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(button_layout)
 
     def create_merge_tab_ui(self):
+        """Create the UI for the Merge PDFs tab."""
         layout = QVBoxLayout(self.merge_tab)
         input_group = QGroupBox("Input Directory")
         input_layout = QGridLayout(input_group)
@@ -315,6 +312,7 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
     def browse_input(self):
+        """Open a file dialog to select the input PDF."""
         path, _ = QFileDialog.getOpenFileName(self, "Select Input PDF", "", "PDF Files (*.pdf)")
         if path: self.input_path_edit.setText(path)
 
@@ -402,13 +400,13 @@ class MainWindow(QMainWindow):
         end_time = time.time()
         duration = end_time - report_data.get('start_time', end_time)
         summary_lines = [
-            f"\n{'='*30}", "PROCESS SUMMARY", f"{'='*30}",
+            f"\n{'='*30}", "PROCESS SUMMARY", f"{'{'}='*30}",
             f"Operation: {report_data.get('operation_type', 'N/A').replace('_', ' ').title()}",
             f"Duration: {duration:.2f} seconds",
             f"Total files processed: {report_data.get('total_files_processed', 0)}",
             f"Successful: {len(report_data.get('success', []))}",
             f"Failed: {len(report_data.get('failures', []))}",
-            f"{'='*30}\n"
+            f"{'{'}='*30}\n"
         ]
         self.update_log("\n".join(summary_lines))
 
@@ -427,14 +425,15 @@ class MainWindow(QMainWindow):
         if self.pause_event:
             if self.pause_event.is_set():
                 self.pause_event.clear()
-                self.split_pause_resume_btn.setText("Resume")
-                self.merge_pause_resume_btn.setText("Resume")
-                self.update_log("--- Paused ---")
+                text = "Resume"
+                log_message = "--- Paused ---"
             else:
                 self.pause_event.set()
-                self.split_pause_resume_btn.setText("Pause")
-                self.merge_pause_resume_btn.setText("Pause")
-                self.update_log("--- Resumed ---")
+                text = "Pause"
+                log_message = "--- Resumed ---"
+            self.split_pause_resume_btn.setText(text)
+            self.merge_pause_resume_btn.setText(text)
+            self.update_log(log_message)
 
     def cancel_process(self):
         if self.cancel_event:
