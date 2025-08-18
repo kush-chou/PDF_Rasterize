@@ -45,10 +45,8 @@ def load_config():
         try:
             with open(CONFIG_FILE, 'r') as f:
                 CONFIG.update(json.load(f))
-        except json.JSONDecodeError:
-            logging.warning("Config file config.json is corrupted. Using default paths.")
-        except TypeError:
-            logging.warning("Invalid data type in config.json. Using default paths.")
+        except (json.JSONDecodeError, TypeError):
+            logging.warning("Could not read config.json. Using default paths.")
 
 def save_config():
     with open(CONFIG_FILE, 'w') as f:
@@ -146,6 +144,7 @@ class SettingsWindow(QDialog):
         layout = QGridLayout(self)
 
         self.gs_path_edit = QLineEdit(CONFIG.get("gs_path"))
+        self.find_gs_path() # Automatically find Ghostscript
 
         layout.addWidget(QLabel("Ghostscript (gs) Path:"), 0, 0)
         layout.addWidget(self.gs_path_edit, 0, 1)
@@ -157,6 +156,24 @@ class SettingsWindow(QDialog):
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box, 2, 0, 1, 3)
+
+    def find_gs_path(self):
+        """Find Ghostscript executable in common locations."""
+        if sys.platform == "win32":
+            # Look in Program Files for gswin64c.exe or gswin32c.exe
+            gs_exe = "gswin64c.exe" if sys.maxsize > 2**32 else "gswin32c.exe"
+            search_paths = [os.path.join(os.environ["ProgramFiles"], "gs")]
+            for path in search_paths:
+                for root, _, files in os.walk(path):
+                    if gs_exe in files:
+                        self.gs_path_edit.setText(os.path.join(root, gs_exe))
+                        return
+        else:
+            # Look in /usr/local/bin and /opt/homebrew/bin for gs
+            for path in ["/usr/local/bin/gs", "/opt/homebrew/bin/gs"]:
+                if os.path.exists(path):
+                    self.gs_path_edit.setText(path)
+                    return
 
     def browse_file(self, line_edit):
         path, _ = QFileDialog.getOpenFileName(self, "Select Executable")
@@ -174,12 +191,11 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 700, 650)
         self.threadpool = QThreadPool()
         self.cancel_event = None
-        self.pause_event = None
+        self.pause_event = threading.Event()
         self.create_ui()
         load_config()
 
     def create_ui(self):
-        """Create the main UI components."""
         self.create_menu()
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -203,7 +219,6 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.log_box)
 
     def create_menu(self):
-        """Create the main menu bar."""
         file_menu = self.menuBar().addMenu("&File") # type: ignore
         settings_action = QAction("Settings", self)
         settings_action.triggered.connect(lambda: SettingsWindow(self).exec())
@@ -215,7 +230,6 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
 
     def create_split_tab_ui(self):
-        """Create the UI for the Split & Rasterize tab."""
         layout = QVBoxLayout(self.split_tab)
         io_group = QGroupBox("Input and Output")
         io_layout = QGridLayout(io_group)
@@ -280,7 +294,6 @@ class MainWindow(QMainWindow):
         layout.addLayout(button_layout)
 
     def create_merge_tab_ui(self):
-        """Create the UI for the Merge PDFs tab."""
         layout = QVBoxLayout(self.merge_tab)
         input_group = QGroupBox("Input Directory")
         input_layout = QGridLayout(input_group)
@@ -312,7 +325,6 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
     def browse_input(self):
-        """Open a file dialog to select the input PDF."""
         path, _ = QFileDialog.getOpenFileName(self, "Select Input PDF", "", "PDF Files (*.pdf)")
         if path: self.input_path_edit.setText(path)
 
@@ -421,19 +433,27 @@ class MainWindow(QMainWindow):
             self.merge_pause_resume_btn.hide()
             self.merge_cancel_btn.hide()
 
+    def closeEvent(self, event):
+        """Ensure threads are canceled on exit."""
+        if self.cancel_event:
+            self.cancel_event.set()
+        self.threadpool.waitForDone()
+        event.accept()
+
     def toggle_pause_resume(self):
-        if self.pause_event:
-            if self.pause_event.is_set():
-                self.pause_event.clear()
-                text = "Resume"
-                log_message = "--- Paused ---"
-            else:
-                self.pause_event.set()
-                text = "Pause"
-                log_message = "--- Resumed ---"
-            self.split_pause_resume_btn.setText(text)
-            self.merge_pause_resume_btn.setText(text)
-            self.update_log(log_message)
+        if self.pause_event is None:
+            return
+        if self.pause_event.is_set():
+            self.pause_event.clear()
+            text = "Resume"
+            log_message = "--- Paused ---"
+        else:
+            self.pause_event.set()
+            text = "Pause"
+            log_message = "--- Resumed ---"
+        self.split_pause_resume_btn.setText(text)
+        self.merge_pause_resume_btn.setText(text)
+        self.update_log(log_message)
 
     def cancel_process(self):
         if self.cancel_event:

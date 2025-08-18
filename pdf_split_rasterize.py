@@ -671,8 +671,9 @@ def generate_html_report(report_data, output_path):
         </ul>
     </body>
     </html>
-    """)
+    """
     try:
+        # Statements must be separated by newlines or semicolons
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(html)
         logging.info(f"HTML report generated at: {output_path}")
