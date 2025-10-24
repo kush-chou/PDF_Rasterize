@@ -1,0 +1,14 @@
+README.md
+pyproject.toml
+src/pdf_processor_suite/__init__.py
+src/pdf_processor_suite/pdf_gui.py
+src/pdf_processor_suite/pdf_gui_minimal.py
+src/pdf_processor_suite/pdf_split_rasterize.py
+src/pdf_processor_suite.egg-info/PKG-INFO
+src/pdf_processor_suite.egg-info/SOURCES.txt
+src/pdf_processor_suite.egg-info/dependency_links.txt
+src/pdf_processor_suite.egg-info/entry_points.txt
+src/pdf_processor_suite.egg-info/requires.txt
+src/pdf_processor_suite.egg-info/top_level.txt
+tests/test_integration.py
+tests/test_pdf_split_rasterize.py

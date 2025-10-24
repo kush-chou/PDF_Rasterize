@@ -1,4 +1,4 @@
 {
-    "gs_path": "gs",
-    "magick_path": "magick"
+    "gs_path": "/opt/homebrew/bin/gs",
+    "magick_path": "/opt/homebrew/bin/magick"
 }

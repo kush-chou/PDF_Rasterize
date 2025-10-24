@@ -17,9 +17,16 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "pypdf",
+    "PyPDF2",
+    "PyQt6"
 ]
 
 [project.scripts]
-pdf-processor = "pdf_split_rasterize:main_cli"
-move-files-up = "move_files_up:main_cli"
+pdf-processor = "pdf_processor_suite.pdf_split_rasterize:main_cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

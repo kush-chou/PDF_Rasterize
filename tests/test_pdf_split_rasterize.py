@@ -2,16 +2,13 @@ import unittest
 import sys
 from pathlib import Path
 
-# Add the parent directory to the path so we can import the script
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from pdf_split_rasterize import sanitize_filename, _calculate_end_pages_recursively
+from pdf_processor_suite.pdf_split_rasterize import sanitize_filename, _calculate_end_pages_recursively
 
 class TestSanitizeFilename(unittest.TestCase):
     """Tests for the filename sanitization function."""
 
     def test_removes_invalid_chars(self):
-        self.assertEqual(sanitize_filename('file/with\\invalid:chars*?<>"|'), 'file-with-invalid-chars')
+        self.assertEqual(sanitize_filename('file/with\invalid:chars*?<|"">'), 'file-with-invalid-chars')
 
     def test_strips_whitespace(self):
         self.assertEqual(sanitize_filename('  leading and trailing  '), 'leading and trailing')

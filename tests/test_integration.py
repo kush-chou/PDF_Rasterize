@@ -5,11 +5,7 @@ from pathlib import Path
 import sys
 from unittest import mock
 
-# --- Add parent directory to path to allow module imports ---
-# This is necessary for running tests from the 'tests' directory
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from pdf_split_rasterize import main_entry
+from pdf_processor_suite.pdf_split_rasterize import main_entry
 
 # --- Helper to create a test PDF ---
 try:
@@ -72,7 +68,7 @@ class TestEndToEndWorkflow(unittest.TestCase):
         """Clean up the temporary directory after tests."""
         shutil.rmtree(self.test_dir)
 
-    @mock.patch('pdf_split_rasterize.rasterize_pdf') # Patch the underlying function
+    @mock.patch('pdf_processor_suite.pdf_split_rasterize.rasterize_pdf') # Patch the underlying function
     def test_split_and_rasterize_nested_bookmarks(self, mock_rasterize_pdf):
         """
         Tests the full split-and-rasterize workflow with nested bookmarks.
@@ -136,7 +132,7 @@ class TestEndToEndWorkflow(unittest.TestCase):
         # Check that the original split PDFs were cleaned up
         self.assertFalse((self.output_dir / "Chapter 1" / "Section 1.1.pdf").exists())
 
-    @mock.patch('pdf_split_rasterize.rasterize_pdf') # Patch the underlying function
+    @mock.patch('pdf_processor_suite.pdf_split_rasterize.rasterize_pdf') # Patch the underlying function
     def test_split_and_flatten_output(self, mock_rasterize_pdf):
         """
         Tests the workflow with the --flatten-output option enabled.
@@ -186,7 +182,7 @@ class TestEndToEndWorkflow(unittest.TestCase):
         self.assertFalse((self.output_dir / "Chapter 1").exists(), "Nested directory 'Chapter 1' should have been removed.")
         self.assertFalse((self.output_dir / "Chapter 2").exists(), "Nested directory 'Chapter 2' should have been removed.")
 
-    @mock.patch('pdf_split_rasterize.rasterize_pdf')
+    @mock.patch('pdf_processor_suite.pdf_split_rasterize.rasterize_pdf')
     def test_rasterization_failure_handling(self, mock_rasterize_pdf):
         """
         Tests that the system correctly handles a failure during the rasterization of one file.
