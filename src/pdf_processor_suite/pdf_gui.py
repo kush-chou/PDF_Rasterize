@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
+from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal, QStandardPaths
 from PyQt6.QtGui import QAction, QFont
 from PyQt6.QtWidgets import (
     QApplication,
@@ -32,45 +32,68 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-# Ensure the script can find the pdf_split_rasterize module
-try:
-    import pdf_split_rasterize
-except ImportError:
-    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-    import pdf_split_rasterize
+import pdf_split_rasterize
 
 
 # Define a simple Args class to hold attributes like argparse.Namespace
 # --- Configuration Management ---
-def resource_path(relative_path):
-    """Get absolute path to resource, works for dev and for PyInstaller"""
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        # Running in a PyInstaller bundle
-        _base_path = sys._MEIPASS  # type: ignore
-    else:
-        # Running in a normal Python environment
-        _base_path = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(_base_path, relative_path)
 
 
-CONFIG_FILE = resource_path("config.json")
+def get_config_dir() -> Path:
+    """Return the application's configuration directory."""
+    return Path(
+        QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppConfigLocation)
+    )
+
+
+CONFIG_DIR = get_config_dir()
+CONFIG_FILE = CONFIG_DIR / "config.json"
 
 CONFIG = {"gs_path": "gs", "magick_path": "magick"}
 
 
 def load_config():
+    """Load configuration from a JSON file, with error handling."""
     global CONFIG
-    if os.path.exists(CONFIG_FILE):
+    if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, "r") as f:
-                CONFIG.update(json.load(f))
-        except (json.JSONDecodeError, TypeError):
-            logging.warning("Could not read config.json. Using default paths.")
+                user_config = json.load(f)
+                if isinstance(user_config, dict):
+                    CONFIG.update(user_config)
+                else:
+                    raise TypeError("Configuration is not a dictionary.")
+        except (json.JSONDecodeError, TypeError) as e:
+            logging.warning(f"Could not read config.json: {e}. Using default paths.")
+            # Show a warning to the user
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Icon.Warning)
+            msg_box.setText("Could not read the configuration file.")
+            msg_box.setInformativeText(
+                f"The file at {CONFIG_FILE} might be corrupted. "
+                "The application will proceed with default settings."
+            )
+            msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            msg_box.exec()
 
 
 def save_config():
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(CONFIG, f, indent=4)
+    """Save the current configuration to a JSON file."""
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(CONFIG, f, indent=4)
+    except OSError as e:
+        logging.error(f"Could not save configuration to {CONFIG_FILE}: {e}")
+        # Optionally, inform the user about the failure
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Icon.Critical)
+        msg_box.setText("Failed to save settings.")
+        msg_box.setInformativeText(
+            f"Could not write to the configuration file at {CONFIG_FILE}."
+        )
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg_box.exec()
 
 
 class WorkerSignals(QObject):
@@ -159,12 +182,11 @@ def run_split_and_rasterize_wrapper(
     keep_originals,
     dry_run,
     workers,
-    config,
     flatten_output,
     max_split_level,
     rasterize,
-    gs_path,  # Added gs_path
-    magick_path,  # Added magick_path
+    gs_path,
+    magick_path,
     signals,
     cancel_event,
     pause_event,
@@ -180,8 +202,8 @@ def run_split_and_rasterize_wrapper(
     args.workers = workers
     args.flatten_output = flatten_output
     args.max_split_level = max_split_level
-    args.gs_path = gs_path  # Set gs_path
-    args.magick_path = magick_path  # Set magick_path
+    args.gs_path = gs_path
+    args.magick_path = magick_path
     args.html_report = None
 
     _, _, report_data = pdf_split_rasterize.main_entry(
@@ -198,10 +220,9 @@ def run_split_and_rasterize_wrapper(
 
 def run_merge_wrapper(
     merge_dir,
-    merge_output_path,  # Added output path for merge
+    merge_output_path,
     recreate_bookmarks,
-    dry_run,  # Added dry_run flag
-    config,
+    dry_run,
     signals,
     cancel_event,
     pause_event,
@@ -215,10 +236,8 @@ def run_merge_wrapper(
     args.merge_output = None
     args.dry_run = False
     args.no_recreate_bookmarks = not recreate_bookmarks
-    args.gs_path = (
-        gs_path  # Set gs_path (not strictly needed for merge, but passed consistently)
-    )
-    args.magick_path = magick_path  # Set magick_path (not strictly needed for merge, but passed consistently)
+    args.gs_path = gs_path
+    args.magick_path = magick_path
 
     _, _, report_data = pdf_split_rasterize.main_entry(
         args, lambda v, t: signals.progress.emit(v, t), cancel_event, pause_event
@@ -272,18 +291,119 @@ class SettingsWindow(QDialog):
         super().accept()
 
 
+class SummaryDialog(QDialog):
+    """A dialog to show the summary of a process."""
+
+    def __init__(self, report_data, parent=None):
+        super().__init__(parent)
+        self.report_data = report_data
+        self.setWindowTitle("Process Summary")
+        self.setMinimumWidth(600)
+
+        layout = QVBoxLayout(self)
+
+        # Basic summary labels
+        duration = time.time() - report_data.get("start_time", time.time())
+        summary_layout = QGridLayout()
+        summary_layout.addWidget(QLabel("Operation:"), 0, 0)
+        summary_layout.addWidget(
+            QLabel(
+                report_data.get("operation_type", "N/A").replace("_", " ").title()
+            ),
+            0,
+            1,
+        )
+        summary_layout.addWidget(QLabel("Duration:"), 1, 0)
+        summary_layout.addWidget(QLabel(f"{duration:.2f} seconds"), 1, 1)
+        summary_layout.addWidget(QLabel("Total Files Processed:"), 2, 0)
+        summary_layout.addWidget(
+            QLabel(str(report_data.get("total_files_processed", 0))), 2, 1
+        )
+        summary_layout.addWidget(QLabel("Successful:"), 3, 0)
+        summary_layout.addWidget(
+            QLabel(str(len(report_data.get("success", [])))), 3, 1
+        )
+        summary_layout.addWidget(QLabel("Failed:"), 4, 0)
+        summary_layout.addWidget(
+            QLabel(str(len(report_data.get("failures", [])))), 4, 1
+        )
+        layout.addLayout(summary_layout)
+
+        # Details for successes and failures
+        if report_data.get("success") or report_data.get("failures"):
+            details_group = QGroupBox("Details")
+            details_layout = QVBoxLayout(details_group)
+
+            if report_data.get("success"):
+                success_button = QPushButton("Show Successful Files")
+                success_button.clicked.connect(self.show_successes)
+                details_layout.addWidget(success_button)
+
+            if report_data.get("failures"):
+                failures_button = QPushButton("Show Failed Files")
+                failures_button.clicked.connect(self.show_failures)
+                details_layout.addWidget(failures_button)
+
+            layout.addWidget(details_group)
+
+        # OK button
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        button_box.accepted.connect(self.accept)
+        layout.addWidget(button_box)
+
+    def show_successes(self):
+        """Show a list of successfully processed files."""
+        self.show_details_list("Successful Files", self.report_data.get("success", []))
+
+    def show_failures(self):
+        """Show a list of failed files and the reasons."""
+        failures = self.report_data.get("failures", [])
+        formatted_failures = [f"{path}: {error}" for path, error in failures]
+        self.show_details_list("Failed Files", formatted_failures)
+
+    def show_details_list(self, title, items):
+        """A helper dialog to display a list of items."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setMinimumSize(500, 300)
+        layout = QVBoxLayout(dialog)
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setText("\n".join(map(str, items)))
+        layout.addWidget(text_edit)
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        button_box.accepted.connect(dialog.accept)
+        layout.addWidget(button_box)
+        dialog.exec()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.config = {}
         self.threadpool = QThreadPool()
         self.cancel_event = threading.Event()
         self.pause_event = threading.Event()
         self.setWindowTitle("PDF Rasterize")
         self.setGeometry(100, 100, 700, 800)
         self.create_ui()
-        self.input_path_edit.setText(os.path.expanduser("~/Downloads"))
-        self.output_path_edit.setText(os.path.expanduser("~/Desktop/Split Books"))
+        self.input_path_edit.setText(CONFIG.get("input_path", ""))
+        self.output_path_edit.setText(CONFIG.get("output_path", ""))
+        self.merge_dir_edit.setText(CONFIG.get("merge_dir", ""))
+        self.set_running_state(False, "split")
+        self.set_running_state(False, "merge")
+        self.set_running_state(False, "split")
+        self.set_running_state(False, "merge")
+
+    def set_running_state(self, running: bool, operation_type: str):
+        """Show or hide buttons based on the running state."""
+        if operation_type == "split":
+            self.split_start_btn.setHidden(running)
+            self.split_pause_resume_btn.setHidden(not running)
+            self.split_cancel_btn.setHidden(not running)
+        elif operation_type == "merge":
+            self.merge_start_btn.setHidden(running)
+            self.merge_pause_resume_btn.setHidden(not running)
+            self.merge_cancel_btn.setHidden(not running)
 
     def create_ui(self):
         main_widget = QWidget()
@@ -292,12 +412,12 @@ class MainWindow(QMainWindow):
 
         self.create_menu()
 
-        tabs = QTabWidget()
+        self.tabs = QTabWidget()
         self.split_tab = QWidget()
         self.merge_tab = QWidget()
-        tabs.addTab(self.split_tab, "Split")
-        tabs.addTab(self.merge_tab, "Merge")
-        main_layout.addWidget(tabs)
+        self.tabs.addTab(self.split_tab, "Split")
+        self.tabs.addTab(self.merge_tab, "Merge")
+        main_layout.addWidget(self.tabs)
 
         self.create_split_tab_ui()
         self.create_merge_tab_ui()
@@ -346,9 +466,21 @@ class MainWindow(QMainWindow):
         self.input_path_edit = QLineEdit()
         self.output_path_edit = QLineEdit()
         browse_in_btn = QPushButton("Browse")
-        browse_in_btn.clicked.connect(self.browse_input)
+        browse_in_btn.clicked.connect(
+            lambda: self.browse(
+                self.input_path_edit,
+                "Select Input PDF",
+                QFileDialog.FileMode.ExistingFile,
+            )
+        )
         browse_out_btn = QPushButton("Browse")
-        browse_out_btn.clicked.connect(self.browse_output)
+        browse_out_btn.clicked.connect(
+            lambda: self.browse(
+                self.output_path_edit,
+                "Select Output Folder",
+                QFileDialog.FileMode.Directory,
+            )
+        )
         io_layout.addWidget(QLabel("Input PDF:"), 0, 0)
         io_layout.addWidget(self.input_path_edit, 0, 1)
         io_layout.addWidget(browse_in_btn, 0, 2)
@@ -361,16 +493,16 @@ class MainWindow(QMainWindow):
         settings_layout = QGridLayout(settings_group)
         self.dpi_spinbox = QSpinBox()
         self.dpi_spinbox.setRange(100, 1200)
-        self.dpi_spinbox.setValue(self.config.get("dpi", 300))
+        self.dpi_spinbox.setValue(CONFIG.get("dpi", 300))
         self.workers_spinbox = QSpinBox()
         self.workers_spinbox.setRange(1, os.cpu_count() or 1)
-        self.workers_spinbox.setValue(self.config.get("workers", os.cpu_count() or 1))
+        self.workers_spinbox.setValue(CONFIG.get("workers", os.cpu_count() or 1))
         self.keep_originals_chk = QCheckBox("Keep original split PDFs")
-        self.keep_originals_chk.setChecked(self.config.get("keep_originals", False))
+        self.keep_originals_chk.setChecked(CONFIG.get("keep_originals", False))
         self.dry_run_chk = QCheckBox("Dry Run (show what would happen)")
-        self.dry_run_chk.setChecked(self.config.get("dry_run", False))
+        self.dry_run_chk.setChecked(CONFIG.get("dry_run", False))
         self.flatten_output_chk = QCheckBox("Create flat output folder")
-        self.flatten_output_chk.setChecked(self.config.get("flatten_output", True))
+        self.flatten_output_chk.setChecked(CONFIG.get("flatten_output", True))
         settings_layout.addWidget(QLabel("DPI:"), 0, 0)
         settings_layout.addWidget(self.dpi_spinbox, 0, 1)
         settings_layout.addWidget(QLabel("Workers:"), 0, 2)
@@ -380,7 +512,7 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(self.flatten_output_chk, 3, 0, 1, 4)
 
         self.rasterize_checkbox = QCheckBox("Rasterize after splitting")
-        self.rasterize_checkbox.setChecked(self.config.get("rasterize", True))
+        self.rasterize_checkbox.setChecked(CONFIG.get("rasterize", True))
         settings_layout.addWidget(self.rasterize_checkbox, 5, 0, 1, 2)
 
         self.limit_level_chk = QCheckBox("Limit splitting to bookmark level:")
@@ -394,7 +526,6 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(self.max_level_spinbox, 4, 2, 1, 2)
         layout.addWidget(settings_group)
 
-        button_layout = QHBoxLayout()
         self.split_start_btn = QPushButton("Start Processing")
         self.split_start_btn.clicked.connect(self.start_split_process)
         self.split_pause_resume_btn = QPushButton("Pause")
@@ -404,8 +535,6 @@ class MainWindow(QMainWindow):
         button_layout.addWidget(self.split_start_btn)
         button_layout.addWidget(self.split_pause_resume_btn)
         button_layout.addWidget(self.split_cancel_btn)
-        self.split_pause_resume_btn.hide()
-        self.split_cancel_btn.hide()
         layout.addLayout(button_layout)
 
     def create_merge_tab_ui(self):
@@ -414,7 +543,13 @@ class MainWindow(QMainWindow):
         input_layout = QGridLayout(input_group)
         self.merge_dir_edit = QLineEdit()
         browse_merge_btn = QPushButton("Browse")
-        browse_merge_btn.clicked.connect(self.browse_merge_dir)
+        browse_merge_btn.clicked.connect(
+            lambda: self.browse(
+                self.merge_dir_edit,
+                "Select Folder with Rasterized PDFs",
+                QFileDialog.FileMode.Directory,
+            )
+        )
         input_layout.addWidget(QLabel("Folder:"), 0, 0)
         input_layout.addWidget(self.merge_dir_edit, 0, 1)
         input_layout.addWidget(browse_merge_btn, 0, 2)
@@ -424,7 +559,6 @@ class MainWindow(QMainWindow):
         self.recreate_bookmarks_chk.setChecked(True)
         layout.addWidget(self.recreate_bookmarks_chk)
 
-        button_layout = QHBoxLayout()
         self.merge_start_btn = QPushButton("Start Merging")
         self.merge_start_btn.clicked.connect(self.start_merge_process)
         self.merge_pause_resume_btn = QPushButton("Pause")
@@ -434,29 +568,18 @@ class MainWindow(QMainWindow):
         button_layout.addWidget(self.merge_start_btn)
         button_layout.addWidget(self.merge_pause_resume_btn)
         button_layout.addWidget(self.merge_cancel_btn)
-        self.merge_pause_resume_btn.hide()
-        self.merge_cancel_btn.hide()
         layout.addLayout(button_layout)
         layout.addStretch()
 
-    def browse_input(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Input PDF", "", "PDF Files (*.pdf)"
-        )
-        if path:
-            self.input_path_edit.setText(path)
+    def browse(self, line_edit: QLineEdit, caption: str, mode: QFileDialog.FileMode):
+        """Open a file or directory dialog and set the path to the line edit."""
+        if mode == QFileDialog.FileMode.Directory:
+            path = QFileDialog.getExistingDirectory(self, caption)
+        else:
+            path, _ = QFileDialog.getOpenFileName(self, caption, "", "PDF Files (*.pdf)")
 
-    def browse_output(self):
-        path = QFileDialog.getExistingDirectory(self, "Select Output Folder")
         if path:
-            self.output_path_edit.setText(path)
-
-    def browse_merge_dir(self):
-        path = QFileDialog.getExistingDirectory(
-            self, "Select Folder with Rasterized PDFs"
-        )
-        if path:
-            self.merge_dir_edit.setText(path)
+            line_edit.setText(path)
 
     def start_split_process(self):
         input_pdf = self.input_path_edit.text()
@@ -468,22 +591,20 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self.split_start_btn.hide()
+        self.set_running_state(True, "split")
         self.split_pause_resume_btn.setText("Pause")
-        self.split_pause_resume_btn.show()
-        self.split_cancel_btn.show()
         self.progress_bar.setValue(0)
         self.progress_bar.setMaximum(100)
         self.progress_bar.show()
 
         # Save settings for next time
-        self.config["input_path"] = input_pdf
-        self.config["output_path"] = output_dir
-        self.config["dpi"] = self.dpi_spinbox.value()
-        self.config["rasterize"] = self.rasterize_checkbox.isChecked()
-        self.config["keep_originals"] = self.keep_originals_chk.isChecked()
-        self.config["flatten_output"] = self.flatten_output_chk.isChecked()
-        self.config["max_split_level"] = (
+        CONFIG["input_path"] = input_pdf
+        CONFIG["output_path"] = output_dir
+        CONFIG["dpi"] = self.dpi_spinbox.value()
+        CONFIG["rasterize"] = self.rasterize_checkbox.isChecked()
+        CONFIG["keep_originals"] = self.keep_originals_chk.isChecked()
+        CONFIG["flatten_output"] = self.flatten_output_chk.isChecked()
+        CONFIG["max_split_level"] = (
             self.max_level_spinbox.value() if self.limit_level_chk.isChecked() else 0
         )
 
@@ -500,15 +621,16 @@ class MainWindow(QMainWindow):
             self.keep_originals_chk.isChecked(),
             self.dry_run_chk.isChecked(),
             self.workers_spinbox.value(),
-            self.config,
             self.flatten_output_chk.isChecked(),
             self.max_level_spinbox.value() if self.limit_level_chk.isChecked() else 0,
-            self.rasterize_checkbox.isChecked(),  # Pass the checkbox state
-            self.config.get("gs_path", "gs"),  # Pass Ghostscript path
-            self.config.get("magick_path", "magick"),  # Pass ImageMagick path
+            self.rasterize_checkbox.isChecked(),
+            CONFIG.get("gs_path", "gs"),
+            CONFIG.get("magick_path", "magick"),
         )
         self.connect_worker_signals(worker)
         self.threadpool.start(worker)
+        save_config()
+        save_config()
 
     def start_merge_process(self):
         merge_dir = self.merge_dir_edit.text()
@@ -519,9 +641,11 @@ class MainWindow(QMainWindow):
         self.log_box.clear()
         self.update_log("Starting merge process...")
         self.progress_bar.show()
-        self.merge_start_btn.hide()
-        self.merge_pause_resume_btn.show()
-        self.merge_cancel_btn.show()
+        self.set_running_state(True, "merge")
+        self.merge_pause_resume_btn.setText("Pause")
+
+        # Save settings for next time
+        CONFIG["merge_dir"] = merge_dir
 
         self.cancel_event = threading.Event()
         self.pause_event = threading.Event()
@@ -534,16 +658,12 @@ class MainWindow(QMainWindow):
             self.merge_dir_edit.text(),
             self.recreate_bookmarks_chk.isChecked(),
             self.dry_run_chk.isChecked(),
-            self.config,
-            self.config.get(
-                "gs_path", "gs"
-            ),  # Pass Ghostscript path (though not used in merge_pdfs directly, good practice)
-            self.config.get(
-                "magick_path", "magick"
-            ),  # Pass ImageMagick path (though not used in merge_pdfs directly, good practice)
+            CONFIG.get("gs_path", "gs"),
+            CONFIG.get("magick_path", "magick"),
         )
         self.connect_worker_signals(worker)
         self.threadpool.start(worker)
+        save_config()
 
     def connect_worker_signals(self, worker):
         worker.signals.log.connect(self.update_log)
@@ -565,44 +685,32 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, title, message)
 
     def show_summary(self, report_data):
-        end_time = time.time()
-        duration = end_time - report_data.get("start_time", end_time)
-        summary_lines = [
-            f"\n{'=' * 30}",
-            "PROCESS SUMMARY",
-            f"{'=' * 30}",
-            f"Operation: {report_data.get('operation_type', 'N/A').replace('_', ' ').title()}",
-            f"Duration: {duration:.2f} seconds",
-            f"Total files processed: {report_data.get('total_files_processed', 0)}",
-            f"Successful: {len(report_data.get('success', []))}",
-            f"Failed: {len(report_data.get('failures', []))}",
-            f"{'=' * 30}\n",
-        ]
-        self.update_log("\n".join(summary_lines))
+        summary_dialog = SummaryDialog(report_data, self)
+        summary_dialog.exec()
 
     def cleanup_ui(self, operation_type):
         self.progress_bar.hide()
-        if operation_type == "split":
-            self.split_start_btn.show()
-            self.split_pause_resume_btn.hide()
-            self.split_cancel_btn.hide()
-        elif operation_type == "merge":
-            self.merge_start_btn.show()
-            self.merge_pause_resume_btn.hide()
-            self.merge_cancel_btn.hide()
+        self.set_running_state(False, operation_type)
         self.cancel_event.clear()
 
     def toggle_pause_resume(self):
+        current_tab_index = self.tabs.currentIndex()
+        operation_type = "split" if current_tab_index == 0 else "merge"
+
         if self.pause_event.is_set():
             self.pause_event.clear()
             self.update_log("--- Resumed ---")
-            self.split_pause_resume_btn.setText("Pause")
-            self.merge_pause_resume_btn.setText("Pause")
+            if operation_type == "split":
+                self.split_pause_resume_btn.setText("Pause")
+            else:
+                self.merge_pause_resume_btn.setText("Pause")
         else:
             self.pause_event.set()
             self.update_log("--- Paused ---")
-            self.split_pause_resume_btn.setText("Resume")
-            self.merge_pause_resume_btn.setText("Resume")
+            if operation_type == "split":
+                self.split_pause_resume_btn.setText("Resume")
+            else:
+                self.merge_pause_resume_btn.setText("Resume")
 
     def cancel_process(self):
         if self.threadpool.activeThreadCount() > 0:
