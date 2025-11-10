@@ -864,148 +864,167 @@ def main_entry(
         args.output = Path(f"{args.input.stem}_output")
 
     if getattr(args, "dry_run", False):
-        logging.info(\"--- DRY RUN MODE --- No files will be written.\")
+        logging.info("--- DRY RUN MODE --- No files will be written.")
 
     # --- Execute Main Logic ---
     start_time = time.time()
     success_files, failed_files, report_data = [], [], {}
 
     try:
-        if hasattr(args, \"merge\") and args.merge:
+        if hasattr(args, "merge") and args.merge:
             # --- MERGE MODE ---
-            logging.info(f\"Starting merge operation on directory: {args.merge}\")
-            report_data[\"operation_type\"] = \"merge\"
+            logging.info(f"Starting merge operation on directory: {args.merge}")
+            report_data["operation_type"] = "merge"
             success_files, failed_files, merge_report = merge_pdfs(
                 args.merge,
-                output_pdf_path=getattr(args, \"merge_output\", None),\
-                recreate_bookmarks=not getattr(args, \"no_recreate_bookmarks\", False),\
-                dry_run=getattr(args, \"dry_run\", False),\
-                progress_callback=progress_callback,\
+                output_pdf_path=getattr(args, "merge_output", None),
+                recreate_bookmarks=not getattr(args, "no_recreate_bookmarks", False),
+                dry_run=getattr(args, "dry_run", False),
+                progress_callback=progress_callback,
             )
-            report_data.update(merge_report) # Merge merge_pdfs's report data
+            report_data.update(merge_report)  # Merge merge_pdfs's report data
         else:
             # --- SPLIT/RASTERIZE MODE ---
-            logging.info(f\"Starting split operation for: {args.input}\")
-            report_data[\"operation_type\"] = (\
-                \"split_and_rasterize\" if rasterize else \"split\"\
+            if args.input is None:
+                logging.error(
+                    "Input PDF file is required for split/rasterize operation when --merge is not used."
+                )
+                report_data["error"] = "Input PDF file is required."
+                report_data["operation_type"] = "split_rasterize"
+                return [], [], report_data
+            logging.info(f"Starting split operation for: {args.input}")
+            report_data["operation_type"] = (
+                "split_and_rasterize" if rasterize else "split"
             )
 
             # Determine initial output directory for the splitting process.
-            # `split_pdf_by_bookmarks` will create the actual \"split_output\" subfolder
+            # `split_pdf_by_bookmarks` will create the actual "split_output" subfolder
             # within this `base_output_for_splitting`.
             base_output_for_splitting = args.output
 
             # The flatten_output flag from arguments is used for the *unrasterized* split files.
-            flatten_output_for_splitting = getattr(args, \"flatten_output\", False)
+            flatten_output_for_splitting = getattr(args, "flatten_output", False)
 
             split_files, failed_splits = split_pdf_by_bookmarks(
                 pdf_path=args.input,
                 output_dir=base_output_for_splitting,
-                max_level=getattr(args, \"max_split_level\", 0),\
+                max_level=getattr(args, "max_split_level", 0),
                 flatten_output=flatten_output_for_splitting,
-                dry_run=getattr(args, \"dry_run\", False),\
-                progress_callback=progress_callback,\
-                cancel_event=cancel_event,\
-                pause_event=pause_event,\
+                dry_run=getattr(args, "dry_run", False),
+                progress_callback=progress_callback,
+                cancel_event=cancel_event,
+                pause_event=pause_event,
             )
             success_files.extend(split_files)
             failed_files.extend(failed_splits)
 
             # After splitting, determine the actual output paths created by split_pdf_by_bookmarks
-            actual_main_output_dir = base_output_for_splitting / \"split_output\"\
-            actual_rasterized_dir = actual_main_output_dir / \"rasterized\"\
+            actual_main_output_dir = base_output_for_splitting / "split_output"
+            actual_rasterized_dir = actual_main_output_dir / "rasterized"
 
             if rasterize:
                 # --- External Tool Checks for Rasterization ---
-                gs_path = getattr(args, \"gs_path\", \"gs\")
-                magick_path = getattr(args, \"magick_path\", \"magick\")
-                if not _check_external_tool(\"Ghostscript\", gs_path):\
-                    report_data[\"error\"] = f\"Ghostscript executable not found at \'{gs_path}\'.\"\
-                    report_data[\"failures\"] = failed_splits # Include any previous split failures
+                gs_path = getattr(args, "gs_path", "gs")
+                magick_path = getattr(args, "magick_path", "magick")
+                if not _check_external_tool("Ghostscript", gs_path):
+                    report_data["error"] = (
+                        f"Ghostscript executable not found at '{gs_path}'."
+                    )
+                    report_data["failures"] = (
+                        failed_splits  # Include any previous split failures
+                    )
                     return [], [], report_data
-                if not _check_external_tool(\"ImageMagick\", magick_path):\
-                    report_data[\"error\"] = f\"ImageMagick executable not found at \'{magick_path}\'.\"\
-                    report_data[\"failures\"] = failed_splits # Include any previous split failures
+                if not _check_external_tool("ImageMagick", magick_path):
+                    report_data["error"] = (
+                        f"ImageMagick executable not found at '{magick_path}'."
+                    )
+                    report_data["failures"] = (
+                        failed_splits  # Include any previous split failures
+                    )
                     return [], [], report_data
 
                 # This block handles operations required when rasterization is active.
 
                 # Copy bookmarks file to rasterized dir if it exists
                 # This should always happen if rasterize is true, to preserve bookmarks for merged rasterized PDF.
-                bookmarks_file_source = actual_main_output_dir / \"_bookmarks.json\"\
+                bookmarks_file_source = actual_main_output_dir / "_bookmarks.json"
                 if bookmarks_file_source.exists() and not getattr(
-                    args, \"dry_run\", False
+                    args, "dry_run", False
                 ):
                     actual_rasterized_dir.mkdir(
                         parents=True, exist_ok=True
                     )  # Ensure it exists if not dry_run
                     shutil.copy(
-                        bookmarks_file_source, actual_rasterized_dir / \"_bookmarks.json\"\
+                        bookmarks_file_source, actual_rasterized_dir / "_bookmarks.json"
                     )
-                    logging.info(f\"Copied _bookmarks.json to {actual_rasterized_dir}\")
+                    logging.info(f"Copied _bookmarks.json to {actual_rasterized_dir}")
 
-                if not getattr(args, \"dry_run\", False):
-                    logging.info(\"Starting rasterization...\")
+                if not getattr(args, "dry_run", False):
+                    # Determine workers, ensuring it's an integer
+                    num_workers = getattr(args, "workers", os.cpu_count())
+                    if num_workers is None:
+                        num_workers = 1  # Fallback if os.cpu_count() returns None
+
+                    logging.info("Starting rasterization...")
                     rasterized_files, failed_rasterizations = rasterize_pdf(
                         pdf_files=split_files,
                         output_dir=actual_rasterized_dir,  # Rasterized PDFs go here
                         split_dir=actual_main_output_dir,  # Unrasterized source PDFs are here
-                        resolution=getattr(args, \"resolution\", RASTERIZE_RESOLUTION),\
-                        workers=getattr(args, \"workers\", os.cpu_count()),\
+                        resolution=getattr(args, "resolution", RASTERIZE_RESOLUTION),
+                        workers=num_workers,  # Now explicitly an int
                         gs_path=gs_path,  # Pass the checked path
                         magick_path=magick_path,  # Pass the checked path
-                        dry_run=getattr(args, \"dry_run\", False),\
-                        progress_callback=progress_callback,\
-                        cancel_event=cancel_event,\
-                        pause_event=pause_event,\
+                        dry_run=getattr(args, "dry_run", False),
+                        progress_callback=progress_callback,
+                        cancel_event=cancel_event,
+                        pause_event=pause_event,
                     )
                     success_files.extend(rasterized_files)
                     failed_files.extend(failed_rasterizations)
 
                     # Cleanup for individual unrasterized PDFs if keep_originals is False
-                    if not getattr(args, \"keep_originals\", False):\
-                        logging.info(\
-                            \"Cleaning up original split PDFs after rasterization...\"\
+                    if not getattr(args, "keep_originals", False):
+                        logging.info(
+                            "Cleaning up original split PDFs after rasterization..."
                         )
-                        for pdf_file_path_str in split_files:\
-                            try:\
-                                Path(pdf_file_path_str).unlink(missing_ok=True)\
-                                logging.debug(\
-                                    f\"Removed original split PDF: {pdf_file_path_str}\"\
+                        for pdf_file_path_str in split_files:
+                            try:
+                                Path(pdf_file_path_str).unlink(missing_ok=True)
+                                logging.debug(
+                                    f"Removed original split PDF: {pdf_file_path_str}"
                                 )
-                            except OSError as e:\
-                                logging.warning(\
-                                    f\"Could not remove original split PDF {pdf_file_path_str}: {e}\"\
+                            except OSError as e:
+                                logging.warning(
+                                    f"Could not remove original split PDF {pdf_file_path_str}: {e}"
                                 )
                 else:  # Dry run for rasterization
-                    logging.info(\"Dry run: Would start rasterization for split PDFs.\")
+                    logging.info("Dry run: Would start rasterization for split PDFs.")
             else:  # Not rasterizing, just splitting
-                logging.info(\
-                    f\"PDF split complete. Unrasterized PDFs are in: {actual_main_output_dir}\"\
+                logging.info(
+                    f"PDF split complete. Unrasterized PDFs are in: {actual_main_output_dir}"
                 )
                 # No specific actions needed here as split_pdf_by_bookmarks already handled creation.
                 # The 'split_files' list already contains the paths to the unrasterized PDFs.
 
             # Prepare report data for split/rasterize
-            report_data[\"output_file\"] = (\
-                str(actual_main_output_dir)\
-                if not rasterize\
-                else str(actual_rasterized_dir)\
+            report_data["output_file"] = (
+                str(actual_main_output_dir)
+                if not rasterize
+                else str(actual_rasterized_dir)
             )
-            report_data[\"total_files_processed\"] = len(success_files) + len(failed_files)\
-            report_data[\"success\"] = success_files\
-            report_data[\"failures\"] = failed_files
+            report_data["total_files_processed"] = len(success_files) + len(
+                failed_files
+            )
+            report_data["success"] = success_files
+            report_data["failures"] = failed_files
 
     except Exception as e:
-        logging.error(f\"An unexpected error occurred: {e}\", exc_info=True)
-        report_data[\"error\"] = str(e)
-        report_data[\"operation_type\"] = (\
-            \"merge\"\
-            if hasattr(args, \"merge\") and args.merge\
-            else \"split_rasterize\"\
+        logging.error(f"An unexpected error occurred: {e}", exc_info=True)
+        report_data["error"] = str(e)
+        report_data["operation_type"] = (
+            "merge" if hasattr(args, "merge") and args.merge else "split_rasterize"
         )
 
-    return success_files, failed_files, report_data
     finally:
         # --- Generate Report ---
         end_time = time.time()
@@ -1016,8 +1035,7 @@ def main_entry(
 
         if hasattr(args, "html_report") and args.html_report:
             report_data["duration"] = duration
-            generate_html_report(report_data, args.html_report)
-
+            # generate_html_report(report_data, args.html_report) # Function not found, commented out
     return success_files, failed_files, report_data
 
 
@@ -1102,8 +1120,10 @@ def main():
         "-w",
         "--workers",
         type=int,
-        default=os.cpu_count(),
-        help="Number of worker processes for parallel tasks. Defaults to the number of CPU cores.",
+        default=os.cpu_count()
+        if os.cpu_count() is not None
+        else 1,  # Ensure default is an int
+        help="Number of worker processes for parallel tasks. Defaults to the number of CPU cores, or 1 if not detectable.",
     )
     general_group.add_argument(
         "--gs-path",

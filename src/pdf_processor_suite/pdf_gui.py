@@ -6,16 +6,16 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Optional
 
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
-from PyQt6.QtGui import QAction, QFont, QIcon
+from PyQt6.QtGui import QAction, QFont
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
-    QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -40,16 +40,17 @@ except ImportError:
     import pdf_split_rasterize
 
 
+# Define a simple Args class to hold attributes like argparse.Namespace
 # --- Configuration Management ---
 def resource_path(relative_path):
     """Get absolute path to resource, works for dev and for PyInstaller"""
-    try:
-        # PyInstaller creates a temp folder and stores path in _MEIPASS attribute of sys
-        base_path = sys._MEIPASS
-    except Exception:
-        # _MEIPASS is not set; running in a normal Python environment
-        base_path = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_path, relative_path)
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        # Running in a PyInstaller bundle
+        _base_path = sys._MEIPASS  # type: ignore
+    else:
+        # Running in a normal Python environment
+        _base_path = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(_base_path, relative_path)
 
 
 CONFIG_FILE = resource_path("config.json")
@@ -131,7 +132,24 @@ class Worker(QRunnable):
 
 
 class Args:
-    pass
+    """A simple class to hold attributes like argparse.Namespace."""
+
+    def __init__(self):
+        self.input: Optional[Path] = None
+        self.output: Optional[Path] = None
+        self.resolution: Optional[int] = None
+        self.keep_originals: Optional[bool] = None
+        self.dry_run: bool = False
+        self.workers: Optional[int] = None
+        self.flatten_output: bool = False
+        self.max_split_level: Optional[int] = None
+        self.gs_path: Optional[Path] = None
+        self.magick_path: Optional[Path] = None
+        self.html_report: Optional[Path] = None
+        self.merge: Optional[Path] = None
+        self.merge_output: Optional[Path] = None
+        self.no_recreate_bookmarks: bool = False
+        self.verbose: bool = False  # Added verbose since it's a common arg
 
 
 def run_split_and_rasterize_wrapper(
@@ -296,14 +314,30 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.log_box)
 
     def create_menu(self):
-        file_menu = self.menuBar().addMenu("&File")
-        settings_action = QAction("Settings", self)
-        settings_action.triggered.connect(lambda: SettingsWindow(self).exec())
-        file_menu.addAction(settings_action)
-        file_menu.addSeparator()
-        exit_action = QAction("Exit", self)
-        file_menu.addAction(exit_action)
-        exit_action.triggered.connect(self.close)
+        from PyQt6.QtWidgets import (  # Import QMenuBar, QMenu for type hinting
+            QMenu,
+            QMenuBar,
+        )
+        # Optional is already imported at the top of the file
+
+        menu_bar: Optional[QMenuBar] = self.menuBar()
+        if menu_bar:
+            file_menu: Optional[QMenu] = menu_bar.addMenu("&File")
+            if file_menu:
+                settings_action = QAction("Settings", self)
+                settings_action.triggered.connect(lambda: SettingsWindow(self).exec())
+                file_menu.addAction(settings_action)
+                file_menu.addSeparator()
+                exit_action = QAction("Exit", self)
+                file_menu.addAction(exit_action)
+                exit_action.triggered.connect(self.close)
+            else:
+                print("Warning: File menu not available for MainWindow.")
+        else:
+            # Handle the case where menuBar() returns None.
+            # In a production application, more robust error handling or
+            # ensuring the menu bar is always initialized might be needed.
+            print("Warning: QMenuBar not available for MainWindow.")
 
     def create_split_tab_ui(self):
         layout = QVBoxLayout(self.split_tab)
@@ -497,8 +531,8 @@ class MainWindow(QMainWindow):
             self.cancel_event,
             self.pause_event,
             merge_dir,
-            self.merge_output_edit.text(),
-            self.merge_recreate_bookmarks_chk.isChecked(),
+            self.merge_dir_edit.text(),
+            self.recreate_bookmarks_chk.isChecked(),
             self.dry_run_chk.isChecked(),
             self.config,
             self.config.get(
