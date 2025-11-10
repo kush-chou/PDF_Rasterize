@@ -1,36 +1,36 @@
 #!/usr/bin/env python3
-import sys
-import os
 import json
-import time
-import threading
 import logging
+import os
+import sys
+import threading
+import time
 from pathlib import Path
 
+from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
+from PyQt6.QtGui import QAction, QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
-    QMainWindow,
-    QWidget,
-    QLabel,
-    QLineEdit,
-    QPushButton,
-    QFileDialog,
-    QVBoxLayout,
-    QHBoxLayout,
-    QMessageBox,
-    QTabWidget,
-    QTextEdit,
     QCheckBox,
-    QSpinBox,
-    QGroupBox,
-    QProgressBar,
-    QGridLayout,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QSpinBox,
+    QTabWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool
-from PyQt6.QtGui import QFont, QAction, QIcon
 
 # Ensure the script can find the pdf_split_rasterize module
 try:
@@ -78,7 +78,7 @@ class WorkerSignals(QObject):
     finished = pyqtSignal()
     error = pyqtSignal(str, str)
     log = pyqtSignal(str)
-    progress = pyqtSignal(int, int)
+    progress = pyqtSignal(int, str)
     summary = pyqtSignal(dict)
     cleanup_ui = pyqtSignal(str)
 
@@ -130,6 +130,10 @@ class Worker(QRunnable):
             self.signals.finished.emit()  # Signal that the worker is done
 
 
+class Args:
+    pass
+
+
 def run_split_and_rasterize_wrapper(
     input_pdf,
     output_dir,
@@ -141,14 +145,13 @@ def run_split_and_rasterize_wrapper(
     flatten_output,
     max_split_level,
     rasterize,
+    gs_path,  # Added gs_path
+    magick_path,  # Added magick_path
     signals,
     cancel_event,
     pause_event,
 ):
-    """Wrapper to call the main script's entry point for splitting."""
-
-    class Args:
-        pass
+    """Wrapper to call the main script's entry point for splitting and rasterizing."""
 
     args = Args()
     args.input = Path(input_pdf)
@@ -157,10 +160,10 @@ def run_split_and_rasterize_wrapper(
     args.keep_originals = keep_originals
     args.dry_run = dry_run
     args.workers = workers
-    args.gs_path = config.get("gs_path", "gs")
-    args.magick_path = config.get("magick_path", "magick")
     args.flatten_output = flatten_output
     args.max_split_level = max_split_level
+    args.gs_path = gs_path  # Set gs_path
+    args.magick_path = magick_path  # Set magick_path
     args.html_report = None
 
     _, _, report_data = pdf_split_rasterize.main_entry(
@@ -176,44 +179,53 @@ def run_split_and_rasterize_wrapper(
 
 
 def run_merge_wrapper(
-    merge_dir, recreate_bookmarks, config, signals, cancel_event, pause_event
+    merge_dir,
+    merge_output_path,  # Added output path for merge
+    recreate_bookmarks,
+    dry_run,  # Added dry_run flag
+    config,
+    signals,
+    cancel_event,
+    pause_event,
+    gs_path,
+    magick_path,
 ):
     """Wrapper to call the main script's entry point for merging."""
-
-    class Args:
-        pass
 
     args = Args()
     args.merge = Path(merge_dir)
     args.merge_output = None
     args.dry_run = False
     args.no_recreate_bookmarks = not recreate_bookmarks
+    args.gs_path = (
+        gs_path  # Set gs_path (not strictly needed for merge, but passed consistently)
+    )
+    args.magick_path = magick_path  # Set magick_path (not strictly needed for merge, but passed consistently)
 
     _, _, report_data = pdf_split_rasterize.main_entry(
         args, lambda v, t: signals.progress.emit(v, t), cancel_event, pause_event
     )
-    if not cancel_event.is_set():
+    if not cancel_event.is_set():  # Only emit summary if not cancelled
         signals.summary.emit(report_data)
     signals.cleanup_ui.emit("merge")
 
 
 class SettingsWindow(QDialog):
-    """Settings dialog to configure tool paths."""
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         layout = QGridLayout(self)
 
+        # Ghostscript Path
         self.gs_path_edit = QLineEdit(CONFIG.get("gs_path", "gs"))
-        self.magick_path_edit = QLineEdit(CONFIG.get("magick_path", "magick"))
-
         layout.addWidget(QLabel("Ghostscript (gs) Path:"), 0, 0)
         layout.addWidget(self.gs_path_edit, 0, 1)
         gs_browse_btn = QPushButton("Browse")
         gs_browse_btn.clicked.connect(lambda: self.browse_file(self.gs_path_edit))
         layout.addWidget(gs_browse_btn, 0, 2)
 
+        # ImageMagick Path
+        self.magick_path_edit = QLineEdit(CONFIG.get("magick_path", "magick"))
         layout.addWidget(QLabel("ImageMagick (magick) Path:"), 1, 0)
         layout.addWidget(self.magick_path_edit, 1, 1)
         magick_browse_btn = QPushButton("Browse")
@@ -324,7 +336,7 @@ class MainWindow(QMainWindow):
         self.dry_run_chk = QCheckBox("Dry Run (show what would happen)")
         self.dry_run_chk.setChecked(self.config.get("dry_run", False))
         self.flatten_output_chk = QCheckBox("Create flat output folder")
-        self.flatten_output_chk.setChecked(True)
+        self.flatten_output_chk.setChecked(self.config.get("flatten_output", True))
         settings_layout.addWidget(QLabel("DPI:"), 0, 0)
         settings_layout.addWidget(self.dpi_spinbox, 0, 1)
         settings_layout.addWidget(QLabel("Workers:"), 0, 2)
@@ -427,6 +439,7 @@ class MainWindow(QMainWindow):
         self.split_pause_resume_btn.show()
         self.split_cancel_btn.show()
         self.progress_bar.setValue(0)
+        self.progress_bar.setMaximum(100)
         self.progress_bar.show()
 
         # Save settings for next time
@@ -434,9 +447,11 @@ class MainWindow(QMainWindow):
         self.config["output_path"] = output_dir
         self.config["dpi"] = self.dpi_spinbox.value()
         self.config["rasterize"] = self.rasterize_checkbox.isChecked()
-        self.config["keep_originals"] = self.keep_originals_checkbox.isChecked()
-        self.config["flatten_output"] = self.flatten_output_checkbox.isChecked()
-        self.config["max_split_level"] = self.max_level_spinbox.value() if self.limit_level_chk.isChecked() else 0
+        self.config["keep_originals"] = self.keep_originals_chk.isChecked()
+        self.config["flatten_output"] = self.flatten_output_chk.isChecked()
+        self.config["max_split_level"] = (
+            self.max_level_spinbox.value() if self.limit_level_chk.isChecked() else 0
+        )
 
         self.cancel_event = threading.Event()
         self.pause_event = threading.Event()
@@ -454,7 +469,9 @@ class MainWindow(QMainWindow):
             self.config,
             self.flatten_output_chk.isChecked(),
             self.max_level_spinbox.value() if self.limit_level_chk.isChecked() else 0,
-            True,  # rasterize
+            self.rasterize_checkbox.isChecked(),  # Pass the checkbox state
+            self.config.get("gs_path", "gs"),  # Pass Ghostscript path
+            self.config.get("magick_path", "magick"),  # Pass ImageMagick path
         )
         self.connect_worker_signals(worker)
         self.threadpool.start(worker)
@@ -475,8 +492,22 @@ class MainWindow(QMainWindow):
         self.cancel_event = threading.Event()
         self.pause_event = threading.Event()
 
-        worker = Worker(run_merge_wrapper, self.cancel_event, self.pause_event,
-                        merge_dir, self.recreate_bookmarks_chk.isChecked(), self.config)
+        worker = Worker(
+            run_merge_wrapper,
+            self.cancel_event,
+            self.pause_event,
+            merge_dir,
+            self.merge_output_edit.text(),
+            self.merge_recreate_bookmarks_chk.isChecked(),
+            self.dry_run_chk.isChecked(),
+            self.config,
+            self.config.get(
+                "gs_path", "gs"
+            ),  # Pass Ghostscript path (though not used in merge_pdfs directly, good practice)
+            self.config.get(
+                "magick_path", "magick"
+            ),  # Pass ImageMagick path (though not used in merge_pdfs directly, good practice)
+        )
         self.connect_worker_signals(worker)
         self.threadpool.start(worker)
 
@@ -490,10 +521,11 @@ class MainWindow(QMainWindow):
     def update_log(self, message):
         self.log_box.append(message)
 
-    def update_progress(self, value, total):
-        if total > 0:
-            self.progress_bar.setMaximum(total)
-            self.progress_bar.setValue(value)
+    def update_progress(self, value, text):
+        """Update the progress bar and log the status message."""
+        self.progress_bar.setValue(value)
+        if text:
+            self.update_log(text)
 
     def show_error(self, title, message):
         QMessageBox.critical(self, title, message)

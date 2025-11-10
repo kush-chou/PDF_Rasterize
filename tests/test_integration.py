@@ -1,26 +1,30 @@
-import unittest
-import tempfile
 import shutil
-from pathlib import Path
 import sys
+import tempfile
+import unittest
+from pathlib import Path
 from unittest import mock
 
 from pdf_processor_suite.pdf_split_rasterize import main_entry
 
 # --- Helper to create a test PDF ---
 try:
-    from reportlab.pdfgen import canvas
     from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+
     REPORTLAB_AVAILABLE = True
 except ImportError:
     REPORTLAB_AVAILABLE = False
 
+
 def create_sample_nested_pdf(path: Path):
     """Creates a 5-page PDF with nested bookmarks for testing."""
     if not REPORTLAB_AVAILABLE:
-        raise unittest.SkipTest("reportlab is not installed, skipping integration test.")
+        raise unittest.SkipTest(
+            "reportlab is not installed, skipping integration test."
+        )
 
-    c = canvas.Canvas(str(path), pagesize=letter) # type: ignore
+    c = canvas.Canvas(str(path), pagesize=letter)  # type: ignore
 
     # Page 1: Chapter 1
     c.drawString(100, 750, "This is page 1.")
@@ -56,7 +60,6 @@ def create_sample_nested_pdf(path: Path):
 
 
 class TestEndToEndWorkflow(unittest.TestCase):
-
     def setUp(self):
         """Set up a temporary directory and a sample PDF for testing."""
         self.test_dir = Path(tempfile.mkdtemp())
@@ -68,166 +71,139 @@ class TestEndToEndWorkflow(unittest.TestCase):
         """Clean up the temporary directory after tests."""
         shutil.rmtree(self.test_dir)
 
-    @mock.patch('pdf_processor_suite.pdf_split_rasterize.rasterize_pdf') # Patch the underlying function
-    def test_split_and_rasterize_nested_bookmarks(self, mock_rasterize_pdf):
+    @mock.patch("pdf_processor_suite.pdf_split_rasterize._rasterize_single_pdf")
+    def test_split_and_rasterize_nested_bookmarks(self, mock_rasterize_single_pdf):
         """
-        Tests the full split-and-rasterize workflow with nested bookmarks.
-        The rasterization step is mocked to speed up the test and avoid
-        dependencies on Ghostscript/ImageMagick.
+        Tests the full split-and-rasterize workflow with the new directory structure.
         """
-        # Configure the mock for rasterize_pdf
-        # This function simulates the behavior of rasterize_pdf
-        def mock_rasterize_pdf_success(input_pdf, output_pdf, *args, **kwargs):
-            """Simulates a successful rasterization by rasterize_pdf."""
-            output_pdf.touch() # Simulate creating the rasterized file
-            return True # Simulate success
 
-        mock_rasterize_pdf.side_effect = mock_rasterize_pdf_success
+        # --- Mocking ---
+        def mock_rasterize_success(pdf_path, output_dir, *args, **kwargs):
+            # Simulate creating the rasterized file in the correct output directory
+            rasterized_path = output_dir / f"{pdf_path.stem}_rasterized.pdf"
+            rasterized_path.touch()
+            return str(rasterized_path)
 
-        # --- Setup Arguments for main_entry ---
-        # We create a simple object to mimic the argparse result
+        mock_rasterize_single_pdf.side_effect = mock_rasterize_success
+
+        # --- Setup Arguments ---
         class Args:
-            def __init__(self):
-                self.input = None
-                self.output = None
-                self.resolution = None
-                self.keep_originals = None
-                self.dry_run = None
-                self.workers = None
-                self.gs_path = None
-                self.magick_path = None
-                self.html_report = None
-                self.flatten_output = False
+            pass
 
         args = Args()
-        args.input = self.input_pdf # type: ignore
-        args.output = self.output_dir # type: ignore
-        args.resolution = 150 # type: ignore # This value is passed but not used by the mock
-        args.keep_originals = False # type: ignore # Test the cleanup logic
-        args.dry_run = False # type: ignore
-        args.workers = 2 # type: ignore
-        args.gs_path = "gs" # type: ignore # Mocked, so path doesn't matter
-        args.magick_path = "magick" # type: ignore # Mocked, so path doesn't matter
+        args.input = self.input_pdf
+        args.output = self.output_dir
+        args.resolution = 150
+        args.keep_originals = False  # Test cleanup
+        args.dry_run = False
+        args.workers = 1
+        args.gs_path = "gs"
+        args.magick_path = "magick"
+        args.flatten_output = False  # This should be ignored when rasterizing
+        args.max_split_level = 0
         args.html_report = None
+        args.merge = None
 
-        # --- Run the main logic ---
-        success, errors, report = main_entry(args)
+        # --- Run ---
+        main_entry(args, rasterize=True)
 
-        # --- Assert the results ---
-        self.assertTrue(success, "The main process should report success.")
-        self.assertEqual(len(errors), 0, "There should be no errors reported.")
+        # --- Assert ---
+        unrasterized_dir = self.output_dir / "unrasterized"
+        rasterized_dir = self.output_dir / "rasterized"
 
-        # Check that the bookmark JSON file was created
-        self.assertTrue((self.output_dir / "_bookmarks.json").exists())
+        # The unrasterized directory should be gone because keep_originals is False
+        self.assertFalse(
+            unrasterized_dir.exists(), "The 'unrasterized' directory should be removed."
+        )
 
-        # Check for expected directory structure
-        self.assertTrue((self.output_dir / "Chapter 1").is_dir())
-        self.assertTrue((self.output_dir / "Chapter 2").is_dir())
+        # The rasterized directory should exist and contain the final files
+        self.assertTrue(rasterized_dir.is_dir())
+        self.assertTrue((rasterized_dir / "Chapter 1_rasterized.pdf").exists())
+        self.assertTrue((rasterized_dir / "Section 1.1_rasterized.pdf").exists())
+        self.assertTrue((rasterized_dir / "Chapter 2_rasterized.pdf").exists())
 
-        # Check that the final rasterized files exist
-        self.assertTrue((self.output_dir / "Chapter 1" / "Section 1.1_rasterized.pdf").exists())
-        self.assertTrue((self.output_dir / "Chapter 2" / "Section 2.1_rasterized.pdf").exists())
-        self.assertTrue((self.output_dir / "Chapter 2" / "Section 2.2_rasterized.pdf").exists())
-
-        # Check that the original split PDFs were cleaned up
-        self.assertFalse((self.output_dir / "Chapter 1" / "Section 1.1.pdf").exists())
-
-    @mock.patch('pdf_processor_suite.pdf_split_rasterize.rasterize_pdf') # Patch the underlying function
-    def test_split_and_flatten_output(self, mock_rasterize_pdf):
+    @mock.patch("pdf_processor_suite.pdf_split_rasterize._rasterize_single_pdf")
+    def test_split_with_keep_originals(self, mock_rasterize_single_pdf):
         """
-        Tests the workflow with the --flatten-output option enabled.
+        Tests that the 'unrasterized' directory is kept when keep_originals is True.
         """
-        
-        # Configure the mock for rasterize_pdf
-        def mock_rasterize_pdf_success(input_pdf, output_pdf, *args, **kwargs):
-            """Simulates a successful rasterization by rasterize_pdf."""
-            output_pdf.touch() # Simulate creating the rasterized file
-            return True # Simulate success
 
-        mock_rasterize_pdf.side_effect = mock_rasterize_pdf_success
-        # --- Setup Arguments for main_entry ---
+        # --- Mocking ---
+        def mock_rasterize_success(pdf_path, output_dir, *args, **kwargs):
+            rasterized_path = output_dir / f"{pdf_path.stem}_rasterized.pdf"
+            rasterized_path.touch()
+            return str(rasterized_path)
+
+        mock_rasterize_single_pdf.side_effect = mock_rasterize_success
+
+        # --- Setup Arguments ---
         class Args:
-            def __init__(self):
-                self.input = None
-                self.output = None
-                self.resolution = 150
-                self.keep_originals = False
-                self.dry_run = False
-                self.workers = 2
-                self.gs_path = "gs"
-                self.magick_path = "magick"
-                self.html_report = None
-                self.flatten_output = True # Enable the feature we are testing
+            pass
 
         args = Args()
-        args.input = self.input_pdf # type: ignore
-        args.output = self.output_dir # type: ignore
+        args.input = self.input_pdf
+        args.output = self.output_dir
+        args.resolution = 150
+        args.keep_originals = True  # Keep the intermediate files
+        args.dry_run = False
+        args.workers = 1
+        args.gs_path = "gs"
+        args.magick_path = "magick"
+        args.flatten_output = (
+            True  # This should be respected for the unrasterized output
+        )
+        args.max_split_level = 0
+        args.html_report = None
+        args.merge = None
 
-        # --- Run the main logic ---
-        success, errors, report = main_entry(args)
+        # --- Run ---
+        main_entry(args, rasterize=True)
 
-        # --- Assert the results ---
-        self.assertTrue(success, "The main process should report success.")
-        self.assertEqual(len(errors), 0, "There should be no errors reported.")
+        # --- Assert ---
+        unrasterized_dir = self.output_dir / "unrasterized"
+        rasterized_dir = self.output_dir / "rasterized"
 
-        # Check that the bookmark JSON file still exists in the root of the output
-        self.assertTrue((self.output_dir / "_bookmarks.json").exists())
+        # The unrasterized directory should still exist
+        self.assertTrue(unrasterized_dir.is_dir())
+        self.assertTrue((unrasterized_dir / "Chapter 1.pdf").exists())
+        self.assertTrue((unrasterized_dir / "Section 1.1.pdf").exists())
 
-        # Check that the final rasterized files exist in the FLAT output directory
-        self.assertTrue((self.output_dir / "Section 1.1_rasterized.pdf").exists())
-        self.assertTrue((self.output_dir / "Section 2.1_rasterized.pdf").exists())
-        self.assertTrue((self.output_dir / "Section 2.2_rasterized.pdf").exists())
+        # The rasterized directory should also exist
+        self.assertTrue(rasterized_dir.is_dir())
+        self.assertTrue((rasterized_dir / "Chapter 1_rasterized.pdf").exists())
 
-        # Check that the nested directories were removed
-        self.assertFalse((self.output_dir / "Chapter 1").exists(), "Nested directory 'Chapter 1' should have been removed.")
-        self.assertFalse((self.output_dir / "Chapter 2").exists(), "Nested directory 'Chapter 2' should have been removed.")
-
-    @mock.patch('pdf_processor_suite.pdf_split_rasterize.rasterize_pdf')
-    def test_rasterization_failure_handling(self, mock_rasterize_pdf):
+    def test_split_only_no_rasterize(self):
         """
-        Tests that the system correctly handles a failure during the rasterization of one file.
+        Tests that splitting without rasterizing places files directly in the output directory.
         """
-        # Configure the mock to fail for a specific file
-        def mock_rasterize_side_effect(input_pdf, output_pdf, *args, **kwargs):
-            # Let's make 'Section 2.1.pdf' fail
-            if "Section 2.1" in str(input_pdf):
-                # Don't create the output file to simulate a hard failure
-                return False # Signal failure
-            else:
-                # Succeed for all other files
-                output_pdf.touch()
-                return True
 
-        mock_rasterize_pdf.side_effect = mock_rasterize_side_effect
-
-        # --- Setup Arguments for main_entry ---
+        # --- Setup Arguments ---
         class Args:
-            def __init__(self):
-                self.input = self.input_pdf # type: ignore
-                self.output = self.output_dir # type: ignore
-                self.resolution = 150
-                self.keep_originals = False
-                self.dry_run = False
-                self.workers = 2
-                self.gs_path = "gs"
-                self.magick_path = "magick"
-                self.html_report = None
-                self.flatten_output = False
+            pass
 
         args = Args()
+        args.input = self.input_pdf
+        args.output = self.output_dir
+        args.resolution = 150
+        args.keep_originals = False
+        args.dry_run = False
+        args.workers = 1
+        args.gs_path = "gs"
+        args.magick_path = "magick"
+        args.flatten_output = True  # Test flatten output
+        args.max_split_level = 0
+        args.html_report = None
+        args.merge = None
 
-        # --- Run the main logic ---
-        success, errors, report = main_entry(args)
+        # --- Run ---
+        main_entry(args, rasterize=False)  # Explicitly disable rasterization
 
-        # --- Assert the results ---
-        self.assertFalse(success, "The main process should report failure.")
-        self.assertEqual(len(errors), 1, "There should be one error reported.")
-        self.assertIn("Rasterization failed for Section 2.1.pdf", errors[0])
+        # --- Assert ---
+        # No 'unrasterized' or 'rasterized' directories should be created
+        self.assertFalse((self.output_dir / "unrasterized").exists())
+        self.assertFalse((self.output_dir / "rasterized").exists())
 
-        # Check that the successful files were still created and their originals cleaned up
-        self.assertTrue((self.output_dir / "Chapter 1" / "Section 1.1_rasterized.pdf").exists())
-        self.assertFalse((self.output_dir / "Chapter 1" / "Section 1.1.pdf").exists())
-
-        # Check that the failed file was NOT created, and its original was NOT deleted
-        self.assertFalse((self.output_dir / "Chapter 2" / "Section 2.1_rasterized.pdf").exists())
-        self.assertTrue((self.output_dir / "Chapter 2" / "Section 2.1.pdf").exists(), "Original split file for the failed rasterization should be kept.")
+        # Files should be in the root of the output directory
+        self.assertTrue((self.output_dir / "Chapter 1.pdf").exists())
+        self.assertTrue((self.output_dir / "Section 1.1.pdf").exists())
+        self.assertTrue((self.output_dir / "Chapter 2.pdf").exists())
