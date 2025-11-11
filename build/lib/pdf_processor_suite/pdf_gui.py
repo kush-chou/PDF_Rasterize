@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import logging
+import multiprocessing
 import os
 import sys
 import threading
@@ -186,6 +187,9 @@ def run_split_and_rasterize_wrapper(
 ):
     """Wrapper to call the main script's entry point for splitting and rasterizing."""
 
+    # record start time so SummaryDialog can compute duration
+    start_time = time.time()
+
     args = SimpleNamespace(
         input=Path(input_pdf),
         output=Path(output_dir),
@@ -208,6 +212,12 @@ def run_split_and_rasterize_wrapper(
         pause_event,
         rasterize=rasterize,
     )
+    # attach timing information so the summary dialog can show duration
+    report_data = report_data or {}
+    report_data.setdefault("start_time", start_time)
+    report_data.setdefault("end_time", time.time())
+    report_data.setdefault("elapsed_time", report_data["end_time"] - report_data["start_time"])
+
     if not cancel_event.is_set():
         signals.summary.emit(report_data)
     signals.cleanup_ui.emit("split")
@@ -226,6 +236,9 @@ def run_merge_wrapper(
 ):
     """Wrapper to call the main script's entry point for merging."""
 
+    # record start time so SummaryDialog can compute duration
+    start_time = time.time()
+
     args = SimpleNamespace(
         merge=Path(merge_dir),
         merge_output=None,
@@ -239,6 +252,12 @@ def run_merge_wrapper(
     _, _, report_data = pdf_split_rasterize.main_entry(
         args, lambda v, t: signals.progress.emit(v, t), cancel_event, pause_event
     )
+    # attach timing information
+    report_data = report_data or {}
+    report_data.setdefault("start_time", start_time)
+    report_data.setdefault("end_time", time.time())
+    report_data.setdefault("elapsed_time", report_data["end_time"] - report_data["start_time"])
+
     if not cancel_event.is_set():  # Only emit summary if not cancelled
         signals.summary.emit(report_data)
     signals.cleanup_ui.emit("merge")
@@ -300,7 +319,25 @@ class SummaryDialog(QDialog):
         layout = QVBoxLayout(self)
 
         # Basic summary labels
-        duration = time.time() - report_data.get("start_time", time.time())
+        # Prefer an elapsed_time value provided by the worker/report_data.
+        # Fall back to end_time - start_time, then to time.time() - start_time.
+        elapsed = report_data.get("elapsed_time")
+        if elapsed is None:
+            start = report_data.get("start_time")
+            end = report_data.get("end_time")
+            if start is not None and end is not None:
+                try:
+                    elapsed = float(end) - float(start)
+                except Exception:
+                    elapsed = 0.0
+            elif start is not None:
+                try:
+                    elapsed = time.time() - float(start)
+                except Exception:
+                    elapsed = 0.0
+            else:
+                elapsed = 0.0
+        duration = elapsed
         summary_layout = QGridLayout()
         summary_layout.addWidget(QLabel("Operation:"), 0, 0)
         summary_layout.addWidget(
@@ -378,8 +415,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.threadpool = QThreadPool()
-        self.cancel_event = threading.Event()
-        self.pause_event = threading.Event()
+        self.cancel_event = multiprocessing.Event()
+        self.pause_event = multiprocessing.Event()
         self.setWindowTitle("PDF Rasterize")
         self.setGeometry(100, 100, 700, 800)
         self.create_ui()
@@ -494,8 +531,6 @@ class MainWindow(QMainWindow):
         self.workers_spinbox.setValue(config_manager.get("workers", os.cpu_count() or 1))
         self.keep_originals_chk = QCheckBox("Keep original split PDFs")
         self.keep_originals_chk.setChecked(config_manager.get("keep_originals", False))
-        self.dry_run_chk = QCheckBox("Dry Run (show what would happen)")
-        self.dry_run_chk.setChecked(config_manager.get("dry_run", False))
         self.flatten_output_chk = QCheckBox("Create flat output folder")
         self.flatten_output_chk.setChecked(config_manager.get("flatten_output", True))
         settings_layout.addWidget(QLabel("DPI:"), 0, 0)
@@ -503,12 +538,12 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(QLabel("Workers:"), 0, 2)
         settings_layout.addWidget(self.workers_spinbox, 0, 3)
         settings_layout.addWidget(self.keep_originals_chk, 1, 0, 1, 2)
-        settings_layout.addWidget(self.dry_run_chk, 2, 0, 1, 2)
         settings_layout.addWidget(self.flatten_output_chk, 3, 0, 1, 4)
 
         self.rasterize_checkbox = QCheckBox("Rasterize after splitting")
         self.rasterize_checkbox.setChecked(config_manager.get("rasterize", True))
-        settings_layout.addWidget(self.rasterize_checkbox, 5, 0, 1, 2)
+        # Place rasterize checkbox above the bookmark-level controls
+        settings_layout.addWidget(self.rasterize_checkbox, 4, 0, 1, 2)
 
         self.limit_level_chk = QCheckBox("Limit splitting to bookmark level:")
         self.limit_level_chk.setChecked(True)
@@ -517,8 +552,9 @@ class MainWindow(QMainWindow):
         self.max_level_spinbox.setValue(1)
         self.max_level_spinbox.setEnabled(True)
         self.limit_level_chk.toggled.connect(self.max_level_spinbox.setEnabled)
-        settings_layout.addWidget(self.limit_level_chk, 4, 0, 1, 2)
-        settings_layout.addWidget(self.max_level_spinbox, 4, 2, 1, 2)
+        # Move bookmark level controls down one row
+        settings_layout.addWidget(self.limit_level_chk, 5, 0, 1, 2)
+        settings_layout.addWidget(self.max_level_spinbox, 5, 2, 1, 2)
         layout.addWidget(settings_group)
 
         self.split_start_btn = QPushButton("Start Processing")
@@ -615,7 +651,7 @@ class MainWindow(QMainWindow):
             output_dir,
             self.dpi_spinbox.value(),
             self.keep_originals_chk.isChecked(),
-            self.dry_run_chk.isChecked(),
+            False,
             self.workers_spinbox.value(),
             self.flatten_output_chk.isChecked(),
             self.max_level_spinbox.value() if self.limit_level_chk.isChecked() else 0,
@@ -645,7 +681,7 @@ class MainWindow(QMainWindow):
             merge_dir,
             self.merge_dir_edit.text(),
             self.recreate_bookmarks_chk.isChecked(),
-            self.dry_run_chk.isChecked(),
+            False,
             config_manager.get("gs_path", "gs"),
             config_manager.get("magick_path", "magick"),
         )
@@ -658,8 +694,8 @@ class MainWindow(QMainWindow):
         worker.signals.cleanup_ui.connect(self.cleanup_ui)
 
     def _start_worker(self, target_func, *args):
-        self.cancel_event = threading.Event()
-        self.pause_event = threading.Event()
+        self.cancel_event = multiprocessing.Event()
+        self.pause_event = multiprocessing.Event()
 
         worker = Worker(
             target_func,

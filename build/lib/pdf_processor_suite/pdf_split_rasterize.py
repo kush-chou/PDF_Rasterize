@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
@@ -7,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import multiprocessing
 import tempfile
 import threading
 import time
@@ -402,24 +404,23 @@ def split_pdf_by_bookmarks(
 
     successful_files: list[str] = []
     failed_files: list[str] = []
-    total_bookmarks_to_process = [0]  # Use a list to make it mutable inside the closure
-
-    def count_bookmarks(items):
+    
+    total_pages_to_process = [0]
+    def count_pages(items):
         for item in items:
             if max_level == 0 or item["level"] <= max_level:
-                total_bookmarks_to_process[0] += 1
+                total_pages_to_process[0] += (item["end_page_index"] - item["page_index"] + 1)
             if item.get("children"):
-                count_bookmarks(item["children"])
-
-    count_bookmarks(bookmarks)
-    processed_count = 0
+                count_pages(item["children"])
+    count_pages(bookmarks)
+    processed_pages = 0
 
     # --- Recursive Splitting Function ---
     def process_level(
         items: list[Bookmark],
         current_path: Path,
     ):
-        nonlocal processed_count
+        nonlocal processed_pages
         for i, bookmark in enumerate(items):
             # --- GUI Event Handling ---
             if cancel_event and cancel_event.is_set():
@@ -448,18 +449,19 @@ def split_pdf_by_bookmarks(
             # --- Save the PDF ---
             start_page = bookmark["page_index"]
             end_page = bookmark["end_page_index"]
+            num_pages_in_split = end_page - start_page + 1
 
             try:
                 _save_split_pdf(reader, file_path, start_page, end_page, dry_run)
                 successful_files.append(str(file_path))
+                processed_pages += num_pages_in_split
             except Exception as e:
                 logging.error(f"Failed to process bookmark '{bookmark['title']}': {e}")
                 failed_files.append(bookmark["title"])
 
             # --- Update Progress ---
-            processed_count += 1
             if progress_callback:
-                progress = int((processed_count / total_bookmarks_to_process[0]) * 100)
+                progress = int((processed_pages / total_pages_to_process[0]) * 100) if total_pages_to_process[0] > 0 else 0
                 progress_callback(progress, f"Processing: {bookmark['title']}")
 
             # --- Recurse into Children ---
@@ -494,8 +496,8 @@ def _rasterize_single_pdf(
     gs_path: str,
     magick_path: str,
     dry_run: bool = False,
-    cancel_event: threading.Event | None = None,
-    pause_event: threading.Event | None = None,
+    cancel_event: multiprocessing.Event | None = None,
+    pause_event: multiprocessing.Event | None = None,
 ) -> str:
     """
     Rasterizes a single PDF file to a new PDF with embedded images using Ghostscript.
@@ -622,8 +624,19 @@ def rasterize_pdf(
     """
     successful_rasterizations = []
     failed_rasterizations = []
-    total_files = len(pdf_files)
-    processed_count = 0
+    
+    total_pages = 0
+    pages_per_file = {}
+    for pdf_file in pdf_files:
+        try:
+            reader = PdfReader(pdf_file)
+            num_pages = len(reader.pages)
+            total_pages += num_pages
+            pages_per_file[pdf_file] = num_pages
+        except Exception as e:
+            logging.warning(f"Could not read {pdf_file} to get page count: {e}")
+
+    processed_pages = 0
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_pdf = {
@@ -658,9 +671,11 @@ def rasterize_pdf(
                 logging.error(f"Rasterization failed for {pdf_file}: {e}")
                 failed_rasterizations.append(pdf_file)
 
-            processed_count += 1
-            if progress_callback:
-                progress = int((processed_count / total_files) * 100)
+            if pdf_file in pages_per_file:
+                processed_pages += pages_per_file[pdf_file]
+
+            if progress_callback and total_pages > 0:
+                progress = int((processed_pages / total_pages) * 100)
                 progress_callback(progress, f"Rasterizing: {Path(pdf_file).name}")
 
     return successful_rasterizations, failed_rasterizations
@@ -770,7 +785,16 @@ def merge_pdfs(
     successful_files = []
     page_offsets = {}
     current_offset = 0
-    total_files = len(files_to_merge_info)
+    
+    total_pages_to_merge = 0
+    for pdf_path, _ in files_to_merge_info:
+        try:
+            reader = PdfReader(pdf_path)
+            total_pages_to_merge += len(reader.pages)
+        except Exception:
+            pass # ignore if a file can't be read, it will fail later anyway
+
+    processed_pages = 0
 
     for i, (pdf_path, original_bookmark_title) in enumerate(files_to_merge_info):
         try:
@@ -787,9 +811,10 @@ def merge_pdfs(
             # Append to merger
             merger.append(str(pdf_path))
             successful_files.append(str(pdf_path))
+            processed_pages += num_pages
 
-            if progress_callback:
-                progress = int(((i + 1) / total_files) * 100)
+            if progress_callback and total_pages_to_merge > 0:
+                progress = int((processed_pages / total_pages_to_merge) * 100)
                 progress_callback(progress, f"Merging: {pdf_path.name}")
 
         except Exception as e:
@@ -1057,6 +1082,15 @@ def main_entry(
         if hasattr(args, "html_report") and args.html_report:
             report_data["duration"] = duration
             # generate_html_report(report_data, args.html_report) # Function not found, commented out
+        # Attach timing information to report_data for GUI consumption.
+        try:
+            report_data.setdefault("start_time", start_time)
+            report_data.setdefault("end_time", end_time)
+            # prefer explicit duration key if already present, otherwise set elapsed_time
+            report_data.setdefault("elapsed_time", float(duration))
+        except Exception:
+            # Defensive: if conversion fails, still return report_data without timing
+            pass
     return success_files, failed_files, report_data
 
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
@@ -7,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import multiprocessing
 import tempfile
 import threading
 import time
@@ -359,6 +361,7 @@ def split_pdf_by_bookmarks(
     progress_callback=None,
     cancel_event=None,
     pause_event=None,
+    create_parent_splits: bool = True,
 ) -> tuple[list[str], list[str]]:
     """
     Splits a PDF based on its bookmark structure and saves the smaller PDFs.
@@ -449,13 +452,24 @@ def split_pdf_by_bookmarks(
             end_page = bookmark["end_page_index"]
             num_pages_in_split = end_page - start_page + 1
 
-            try:
-                _save_split_pdf(reader, file_path, start_page, end_page, dry_run)
-                successful_files.append(str(file_path))
-                processed_pages += num_pages_in_split
-            except Exception as e:
-                logging.error(f"Failed to process bookmark '{bookmark['title']}': {e}")
-                failed_files.append(bookmark["title"])
+            # Determine if we should create a split for this parent bookmark.
+            should_create_split = True
+            if (
+                not create_parent_splits
+                and bookmark.get("children")
+                and (max_level == 0 or bookmark["level"] < max_level)
+            ):
+                # Skip creating a PDF for parent bookmark when configured to do so
+                should_create_split = False
+
+            if should_create_split:
+                try:
+                    _save_split_pdf(reader, file_path, start_page, end_page, dry_run)
+                    successful_files.append(str(file_path))
+                    processed_pages += num_pages_in_split
+                except Exception as e:
+                    logging.error(f"Failed to process bookmark '{bookmark['title']}': {e}")
+                    failed_files.append(bookmark["title"])
 
             # --- Update Progress ---
             if progress_callback:
@@ -958,6 +972,7 @@ def main_entry(
                 progress_callback=progress_callback,
                 cancel_event=cancel_event,
                 pause_event=pause_event,
+                create_parent_splits=getattr(args, "create_parent_splits", True),
             )
             success_files.extend(split_files)
             failed_files.extend(failed_splits)
@@ -1080,6 +1095,15 @@ def main_entry(
         if hasattr(args, "html_report") and args.html_report:
             report_data["duration"] = duration
             # generate_html_report(report_data, args.html_report) # Function not found, commented out
+        # Attach timing information to report_data for GUI consumption.
+        try:
+            report_data.setdefault("start_time", start_time)
+            report_data.setdefault("end_time", end_time)
+            # prefer explicit duration key if already present, otherwise set elapsed_time
+            report_data.setdefault("elapsed_time", float(duration))
+        except Exception:
+            # Defensive: if conversion fails, still return report_data without timing
+            pass
     return success_files, failed_files, report_data
 
 
