@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
-import os
-import subprocess
-import shutil
-import logging
-import tempfile
 import argparse
-import time
-import json
 import concurrent.futures
+import json
+import logging
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 import threading
+import time
 from pathlib import Path
-from typing import Any # Using Any for complex bookmark structures for now
+from typing import Any  # Using Any for complex bookmark structures for now
 
 # PyPDF2 is used for reading/writing PDFs and handling bookmarks
-from PyPDF2 import PdfReader, PdfWriter
+from PyPDF2 import PdfMerger, PdfReader, PdfWriter
 from PyPDF2.errors import PdfReadError
+
+from .subprocess_utils import run_subprocess
+
 # Import Destination for type checking bookmarks
 from PyPDF2.generic import Destination
-import sys
 
 # --- Global Configuration ---
 RASTERIZE_RESOLUTION = 300  # DPI for rasterization
@@ -32,26 +35,49 @@ def sanitize_filename(name: FilePath) -> str:
     """Removes or replaces characters invalid for filenames/paths."""
     name = str(name)  # Ensure it's a string
     # Remove characters that are problematic in paths
-    name = name.replace('/', '-').replace('\\', '-').replace(':', '-')
+    name = name.replace("/", "-").replace("\\", "-").replace(":", "-")
     # Replace other potentially problematic characters
     invalid_chars = '<>""|?*'
     for char in invalid_chars:
-        name = name.replace(char, '')
+        name = name.replace(char, "")
 
     # --- Extended Sanitization ---
     # Unicode mapping (example: replace smart quotes with standard quotes)
     unicode_map = {
-        '“': '"', '”': '"',  # Double quotes
-        "’": "'", "‘": "'"   # Single quotes
+        "“": '"',
+        "”": '"',  # Double quotes
+        "’": "'",
+        "‘": "'",  # Single quotes
     }
     for uchar, replacement in unicode_map.items():
         name = name.replace(uchar, replacement)
 
     # OS-reserved name check (Windows example)
-    if sys.platform == 'win32':
-        reserved_names = ["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4",
-                          "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2",
-                          "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"]
+    if sys.platform == "win32":
+        reserved_names = [
+            "CON",
+            "PRN",
+            "AUX",
+            "NUL",
+            "COM1",
+            "COM2",
+            "COM3",
+            "COM4",
+            "COM5",
+            "COM6",
+            "COM7",
+            "COM8",
+            "COM9",
+            "LPT1",
+            "LPT2",
+            "LPT3",
+            "LPT4",
+            "LPT5",
+            "LPT6",
+            "LPT7",
+            "LPT8",
+            "LPT9",
+        ]
         if name.upper() in reserved_names:
             name = f"{name}_"  # Append underscore if reserved
     # Strip leading/trailing whitespace and limit length
@@ -69,7 +95,7 @@ def _calculate_end_pages_recursively(
         # The boundary for the current bookmark is the start of its next sibling.
         if i + 1 < len(bookmarks):
             # The next sibling provides the end boundary (exclusive).
-            next_sibling_start_page = bookmarks[i+1]["page_index"]
+            next_sibling_start_page = bookmarks[i + 1]["page_index"]
         else:
             # This is the last item in the list, so its boundary is the parent's boundary.
             next_sibling_start_page = parent_end_page_boundary
@@ -77,12 +103,16 @@ def _calculate_end_pages_recursively(
         # If the bookmark has children, we must process them first to determine their ranges.
         # The children's world is bounded by this bookmark's next sibling.
         if bookmark.get("children"):
-            _calculate_end_pages_recursively(bookmark["children"], next_sibling_start_page, num_pages)
+            _calculate_end_pages_recursively(
+                bookmark["children"], next_sibling_start_page, num_pages
+            )
             # After recursion, the children's end pages are calculated.
             # The parent's end page must be at least the end page of its last child.
-            last_child_end_page = bookmark["children"][-1].get("end_page_index", bookmark["page_index"])
+            last_child_end_page = bookmark["children"][-1].get(
+                "end_page_index", bookmark["page_index"]
+            )
         else:
-            last_child_end_page = -1 # No children, so no child range to consider.
+            last_child_end_page = -1  # No children, so no child range to consider.
 
         # The end page is one less than the start of the next section.
         end_page = next_sibling_start_page - 1
@@ -91,7 +121,9 @@ def _calculate_end_pages_recursively(
         final_end_page = max(end_page, last_child_end_page)
 
         # Final sanity checks: end page cannot be before the start page or after the end of the document.
-        bookmark["end_page_index"] = min(max(bookmark["page_index"], final_end_page), num_pages - 1)
+        bookmark["end_page_index"] = min(
+            max(bookmark["page_index"], final_end_page), num_pages - 1
+        )
 
 
 def get_bookmark_structure_nested(pdf_path: Path) -> list[Bookmark]:
@@ -105,7 +137,9 @@ def get_bookmark_structure_nested(pdf_path: Path) -> list[Bookmark]:
                 reader.decrypt("")
                 logging.info("PDF decrypted successfully.")
             except Exception as decrypt_error:
-                logging.error(f"PDF is encrypted and could not be decrypted: {decrypt_error}")
+                logging.error(
+                    f"PDF is encrypted and could not be decrypted: {decrypt_error}"
+                )
                 return []
 
         outlines = reader.outline
@@ -119,20 +153,27 @@ def get_bookmark_structure_nested(pdf_path: Path) -> list[Bookmark]:
         processed_bookmarks: list[Bookmark] = []
 
         memo: dict[int, int | None] = {}
+
         def get_page_idx(page_obj):
-            page_ref = getattr(page_obj, 'indirect_reference', page_obj)
+            page_ref = getattr(page_obj, "indirect_reference", page_obj)
             obj_id = id(page_ref)
 
             if obj_id not in memo:
                 try:
                     memo[obj_id] = reader.get_page_number(page_obj)
-                    logging.debug(f"Memoizing page number for object ID {obj_id}: {memo[obj_id]}")
+                    logging.debug(
+                        f"Memoizing page number for object ID {obj_id}: {memo[obj_id]}"
+                    )
                 except Exception as e:
-                    logging.warning(f"Could not get page number for page object (type: {type(page_obj)}, repr: {repr(page_obj)}): {e}")
+                    logging.warning(
+                        f"Could not get page number for page object (type: {type(page_obj)}, repr: {repr(page_obj)}): {e}"
+                    )
                     memo[obj_id] = None
             return memo[obj_id]
 
-        def process_outline_recursive(items: list[Destination | list], level: int = 1) -> list[Bookmark]:
+        def process_outline_recursive(
+            items: list[Destination | list], level: int = 1
+        ) -> list[Bookmark]:
             nested_list: list[Bookmark] = []
             if not items:
                 return nested_list
@@ -146,20 +187,26 @@ def get_bookmark_structure_nested(pdf_path: Path) -> list[Bookmark]:
                     logging.debug(f"Processing sub-list at level {level}")
                     children_from_list = process_outline_recursive(item, level + 1)
                     if last_valid_bookmark_node:
-                         logging.debug(f"Assigning {len(children_from_list)} children found in list to parent '{last_valid_bookmark_node['title']}'")
-                         last_valid_bookmark_node["children"].extend(children_from_list)
+                        logging.debug(
+                            f"Assigning {len(children_from_list)} children found in list to parent '{last_valid_bookmark_node['title']}'"
+                        )
+                        last_valid_bookmark_node["children"].extend(children_from_list)
                     else:
-                         logging.debug(f"Found {len(children_from_list)} children in a list, but no immediate parent bookmark node. Adding to current list.")
-                         nested_list.extend(children_from_list)
+                        logging.debug(
+                            f"Found {len(children_from_list)} children in a list, but no immediate parent bookmark node. Adding to current list."
+                        )
+                        nested_list.extend(children_from_list)
 
-                elif isinstance(item, Destination) and hasattr(item, 'title'):
+                elif isinstance(item, Destination) and hasattr(item, "title"):
                     try:
                         title = sanitize_filename(str(item.title))
                         page_index = None
-                        if hasattr(item, 'page'):
-                             page_index = get_page_idx(item.page)
+                        if hasattr(item, "page"):
+                            page_index = get_page_idx(item.page)
                         else:
-                             logging.warning(f"Bookmark '{title}' has no 'page' attribute.")
+                            logging.warning(
+                                f"Bookmark '{title}' has no 'page' attribute."
+                            )
 
                         if page_index is not None:
                             bookmark_data = {
@@ -167,32 +214,44 @@ def get_bookmark_structure_nested(pdf_path: Path) -> list[Bookmark]:
                                 "level": level,
                                 "page_index": page_index,
                                 "end_page_index": num_pages - 1,
-                                "children": []
+                                "children": [],
                             }
-                            logging.debug(f"Processed bookmark: L{level} '{title}' at page index {page_index}")
+                            logging.debug(
+                                f"Processed bookmark: L{level} '{title}' at page index {page_index}"
+                            )
                             nested_list.append(bookmark_data)
                             last_valid_bookmark_node = bookmark_data
                         else:
-                             logging.warning(f"Could not resolve page index for bookmark '{title}'. Skipping.")
+                            logging.warning(
+                                f"Could not resolve page index for bookmark '{title}'. Skipping."
+                            )
 
                     except Exception as e:
-                        title_str = getattr(item, 'title', 'Unknown Title')
-                        logging.warning(f"Skipping bookmark '{title_str}' due to error during processing: {e}")
+                        title_str = getattr(item, "title", "Unknown Title")
+                        logging.warning(
+                            f"Skipping bookmark '{title_str}' due to error during processing: {e}"
+                        )
                 else:
-                    logging.warning(f"Skipping unexpected item type in outline: {type(item)}")
+                    logging.warning(
+                        f"Skipping unexpected item type in outline: {type(item)}"
+                    )
 
             return nested_list
 
         processed_bookmarks = process_outline_recursive(outlines)
 
         logging.info("Calculating end pages for all bookmarks...")
-        _calculate_end_pages_recursively(processed_bookmarks, parent_end_page_boundary=num_pages, num_pages=num_pages)
+        _calculate_end_pages_recursively(
+            processed_bookmarks, parent_end_page_boundary=num_pages, num_pages=num_pages
+        )
 
         def log_final_ranges(items, level=1):
             for item in items:
-                start_idx = item.get('page_index', -1)
-                end_idx = item.get('end_page_index', -1)
-                logging.debug(f"{'  ' * (level-1)}L{level} '{item['title']}' -> Pages {start_idx + 1} to {end_idx + 1}")
+                start_idx = item.get("page_index", -1)
+                end_idx = item.get("end_page_index", -1)
+                logging.debug(
+                    f"{'  ' * (level - 1)}L{level} '{item['title']}' -> Pages {start_idx + 1} to {end_idx + 1}"
+                )
                 if item.get("children"):
                     log_final_ranges(item["children"], level + 1)
 
@@ -201,10 +260,14 @@ def get_bookmark_structure_nested(pdf_path: Path) -> list[Bookmark]:
         return processed_bookmarks
 
     except PdfReadError as e:
-        logging.error(f"Failed to read PDF: {e}. The file may be corrupt or not a valid PDF.")
+        logging.error(
+            f"Failed to read PDF: {e}. The file may be corrupt or not a valid PDF."
+        )
         return []
     except Exception as e:
-        logging.error(f"An unexpected error occurred in get_bookmark_structure_nested: {e}")
+        logging.error(
+            f"An unexpected error occurred in get_bookmark_structure_nested: {e}"
+        )
         return []
 
 
@@ -217,7 +280,9 @@ def _save_split_pdf(
 ) -> None:
     """Saves a page range from the reader to a new PDF file."""
     if dry_run:
-        logging.info(f"[DRY RUN] Would create {output_path} for pages {start_page + 1}-{end_page + 1}")
+        logging.info(
+            f"[DRY RUN] Would create {output_path} for pages {start_page + 1}-{end_page + 1}"
+        )
         return
 
     writer = PdfWriter()
@@ -234,9 +299,55 @@ def _save_split_pdf(
             writer.write(f)
         logging.info(f"Successfully created {output_path}")
     except IndexError:
-        logging.error(f"Page index out of range for {output_path}. Start: {start_page}, End: {end_page}, Total Pages: {len(reader.pages)}")
+        logging.error(
+            f"Page index out of range for {output_path}. Start: {start_page}, End: {end_page}, Total Pages: {len(reader.pages)}"
+        )
     except Exception as e:
         logging.error(f"Failed to write PDF {output_path}: {e}")
+
+
+def _check_external_tool(tool_name: str, path: str) -> bool:
+    """Checks if an external tool is available in PATH or at the specified path."""
+    if shutil.which(path):
+        return True
+    logging.error(
+        f"External tool '{tool_name}' not found. "
+        f"Please ensure '{path}' is in your system's PATH or specify its full path in the application settings."
+    )
+    return False
+
+
+def _create_output_directories(
+    base_output_dir: Path, dry_run: bool
+) -> tuple[Path, Path]:
+    """
+    Creates the main output directory and a subfolder for rasterized files.
+    Returns the paths for the main output and the rasterized content directory.
+    """
+    # The main output directory is now the base directory provided.
+    main_output_dir = base_output_dir
+    # The rasterized directory is a subfolder within the main output directory.
+    rasterized_dir = main_output_dir / "rasterized"
+
+    if not dry_run:
+        # Create both directories. `exist_ok=True` prevents errors if they already exist.
+        main_output_dir.mkdir(parents=True, exist_ok=True)
+        rasterized_dir.mkdir(parents=True, exist_ok=True)
+        logging.info(
+            f"Ensured output directory exists: {main_output_dir}"
+        )
+        logging.info(
+            f"Rasterized files will be saved in: {rasterized_dir}"
+        )
+    else:
+        logging.info(
+            f"[DRY RUN] Would ensure output directory exists: {main_output_dir}"
+        )
+        logging.info(
+            f"[DRY RUN] Would create rasterized directory: {rasterized_dir}"
+        )
+
+    return main_output_dir, rasterized_dir
 
 
 def split_pdf_by_bookmarks(
@@ -257,24 +368,41 @@ def split_pdf_by_bookmarks(
         logging.error(f"Input PDF not found: {pdf_path}")
         return [], []
 
+    # --- Create Output Directories ---
+    main_output_dir, rasterized_output_dir = _create_output_directories(
+        output_dir, dry_run
+    )
+
     # --- Get Bookmark Structure ---
     bookmarks = get_bookmark_structure_nested(pdf_path)
     if not bookmarks:
         logging.warning("No bookmarks found or an error occurred while reading them.")
         return [], []
 
+    # Save bookmarks to JSON for potential merging later
+    # This file should always be saved in the main_output_dir, regardless of flatten_output
+    bookmarks_file = main_output_dir / "_bookmarks.json"
+    if not dry_run:
+        try:
+            # The parent directory (split_output_base_dir) is already created by _create_output_directories
+            with open(bookmarks_file, "w", encoding="utf-8") as f:
+                json.dump(bookmarks, f, indent=4, ensure_ascii=False)
+            logging.info(f"Saved bookmark structure to {bookmarks_file}")
+        except Exception as e:
+            logging.error(f"Failed to save bookmarks file: {e}")
+
     # --- Prepare for Splitting ---
     try:
         reader = PdfReader(pdf_path)
         if reader.is_encrypted:
-            reader.decrypt('')
+            reader.decrypt("")
     except Exception as e:
         logging.error(f"Could not read the source PDF: {e}")
         return [], []
 
     successful_files: list[str] = []
     failed_files: list[str] = []
-    total_bookmarks_to_process = [0] # Use a list to make it mutable inside the closure
+    total_bookmarks_to_process = [0]  # Use a list to make it mutable inside the closure
 
     def count_bookmarks(items):
         for item in items:
@@ -307,14 +435,14 @@ def split_pdf_by_bookmarks(
             # Sanitize title for use in filename
             sanitized_title = sanitize_filename(bookmark["title"])
             if not sanitized_title:
-                sanitized_title = f"Untitled_Bookmark_{i+1}"
+                sanitized_title = f"Untitled_Bookmark_{i + 1}"
 
             # Determine the output path for this bookmark
             if flatten_output:
-                # All files go into the root output directory
-                file_path = output_dir / f"{sanitized_title}.pdf"
+                # All files go into the main output directory
+                file_path = main_output_dir / f"{sanitized_title}.pdf"
             else:
-                # Files are nested according to bookmark structure
+                # Files are nested according to bookmark structure within main_output_dir
                 file_path = current_path / f"{sanitized_title}.pdf"
 
             # --- Save the PDF ---
@@ -336,20 +464,20 @@ def split_pdf_by_bookmarks(
 
             # --- Recurse into Children ---
             if bookmark.get("children"):
-                next_path = current_path / sanitize_filename(bookmark["title"])
-                if flatten_output:
-                    # If flattening, the path for children remains the root
-                    process_level(bookmark["children"], current_path)
-                else:
-                    # Otherwise, descend into a new subdirectory
-                    process_level(bookmark["children"], next_path)
+                next_path = (
+                    current_path  # This is correct: if flatten, current_path is always unrasterized_output_dir
+                    if flatten_output
+                    else current_path / sanitize_filename(bookmark["title"])
+                )
+                process_level(bookmark["children"], next_path)
 
     # --- Start Processing ---
     logging.info(f"Starting PDF split for {pdf_path.name}...")
     if not dry_run:
-        output_dir.mkdir(parents=True, exist_ok=True)
+        # The output directories are already created by _create_output_directories
+        pass  # Remove redundant output_dir.mkdir() call
 
-    process_level(bookmarks, output_dir)
+    process_level(bookmarks, main_output_dir)  # Start with main_output_dir
 
     # --- Final Progress Update ---
     if progress_callback:
@@ -360,6 +488,8 @@ def split_pdf_by_bookmarks(
 
 def _rasterize_single_pdf(
     pdf_path: Path,
+    output_dir: Path,
+    split_dir: Path,
     resolution: int,
     gs_path: str,
     magick_path: str,
@@ -373,12 +503,21 @@ def _rasterize_single_pdf(
     """
     if cancel_event and cancel_event.is_set():
         raise InterruptedError("Rasterization canceled.")
+    while pause_event and pause_event.is_set():
+        time.sleep(0.1)
 
-    output_pdf_path = pdf_path.with_name(f"{pdf_path.stem}_rasterized.pdf")
+    # Determine output path, preserving relative structure
+    relative_path = pdf_path.relative_to(split_dir)
+    output_pdf_path = (
+        output_dir / relative_path.parent / f"{relative_path.stem}_rasterized.pdf"
+    )
 
     if dry_run:
         logging.info(f"[DRY RUN] Would rasterize {pdf_path} to {output_pdf_path}")
         return str(output_pdf_path)
+
+    # Create the specific output directory if it doesn't exist
+    output_pdf_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Using a temporary directory for intermediate image files
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -388,41 +527,78 @@ def _rasterize_single_pdf(
         # --- Ghostscript command to convert PDF to images ---
         gs_command = [
             gs_path,
+            "-dQUIET",
             "-dSAFER",
             "-dBATCH",
             "-dNOPAUSE",
             "-sDEVICE=jpeg",
             f"-r{resolution}",
-            f'-sOutputFile={image_pattern}',
+            f"-sOutputFile={image_pattern}",
             str(pdf_path),
         ]
 
         logging.debug(f"Executing Ghostscript: {' '.join(gs_command)}")
         try:
-            subprocess.run(gs_command, check=True, capture_output=True, text=True)
+            return_code, stdout, stderr = run_subprocess(gs_command, timeout=600)
+            if return_code != 0:
+                raise subprocess.CalledProcessError(return_code, gs_command, output=stdout, stderr=stderr)
+        except subprocess.TimeoutExpired as e:
+            error_msg = f"Ghostscript timed out for {pdf_path} after {e.timeout} seconds. Error: {e.stderr.strip() if e.stderr else ''}"
+            logging.error(error_msg)
+            raise RuntimeError(f"Ghostscript Timeout: {error_msg}")
         except subprocess.CalledProcessError as e:
-            logging.error(f"Ghostscript failed for {pdf_path}. Error: {e.stderr}")
-            raise
+            error_msg = f"Ghostscript failed for {pdf_path}. Error: {e.stderr.strip()}"
+            logging.error(error_msg)
+            raise RuntimeError(f"Ghostscript Error: {error_msg}")
+        except FileNotFoundError:
+            error_msg = f"Ghostscript executable not found at '{gs_path}'. Ensure it's installed and accessible."
+            logging.error(error_msg)
+            raise RuntimeError(f"Ghostscript Not Found: {error_msg}")
+        except Exception as e:
+            error_msg = f"An unexpected error occurred during Ghostscript processing for {pdf_path}: {e}"
+            logging.error(error_msg)
+            raise RuntimeError(f"Ghostscript General Error: {error_msg}")
 
         # --- ImageMagick command to merge images back into a PDF ---
         image_files = sorted(temp_dir_path.glob("page_*.jpg"))
         if not image_files:
-            logging.warning(f"No images generated by Ghostscript for {pdf_path}. Skipping PDF creation.")
+            logging.warning(
+                f"No images generated by Ghostscript for {pdf_path}. Skipping PDF creation."
+            )
             return ""
 
-        magick_command = [
-            magick_path,
-            "convert",
-        ] + [str(f) for f in image_files] + [
-            str(output_pdf_path),
-        ]
+        magick_command = (
+            [
+                magick_path,
+                "convert",
+            ]
+            + [str(f) for f in image_files]
+            + [
+                str(output_pdf_path),
+            ]
+        )
 
         logging.debug(f"Executing ImageMagick: {' '.join(magick_command)}")
         try:
-            subprocess.run(magick_command, check=True, capture_output=True, text=True)
+            return_code, stdout, stderr = run_subprocess(magick_command, timeout=600)
+            if return_code != 0:
+                raise subprocess.CalledProcessError(return_code, magick_command, output=stdout, stderr=stderr)
+        except subprocess.TimeoutExpired as e:
+            error_msg = f"ImageMagick timed out for {pdf_path} after {e.timeout} seconds. Error: {e.stderr.strip() if e.stderr else ''}"
+            logging.error(error_msg)
+            raise RuntimeError(f"ImageMagick Timeout: {error_msg}")
         except subprocess.CalledProcessError as e:
-            logging.error(f"ImageMagick failed for {pdf_path}. Error: {e.stderr}")
-            raise
+            error_msg = f"ImageMagick failed for {pdf_path}. Error: {e.stderr.strip()}"
+            logging.error(error_msg)
+            raise RuntimeError(f"ImageMagick Error: {error_msg}")
+        except FileNotFoundError:
+            error_msg = f"ImageMagick executable not found at '{magick_path}'. Ensure it's installed and accessible."
+            logging.error(error_msg)
+            raise RuntimeError(f"ImageMagick Not Found: {error_msg}")
+        except Exception as e:
+            error_msg = f"An unexpected error occurred during ImageMagick processing for {pdf_path}: {e}"
+            logging.error(error_msg)
+            raise RuntimeError(f"ImageMagick General Error: {error_msg}")
 
     logging.info(f"Successfully rasterized {pdf_path} to {output_pdf_path}")
     return str(output_pdf_path)
@@ -430,6 +606,8 @@ def _rasterize_single_pdf(
 
 def rasterize_pdf(
     pdf_files: list[str],
+    output_dir: Path,
+    split_dir: Path,
     resolution: int,
     workers: int,
     gs_path: str,
@@ -452,6 +630,8 @@ def rasterize_pdf(
             executor.submit(
                 _rasterize_single_pdf,
                 Path(pdf_file),
+                output_dir,
+                split_dir,
                 resolution,
                 gs_path,
                 magick_path,
@@ -469,7 +649,7 @@ def rasterize_pdf(
                 for f in future_to_pdf:
                     f.cancel()
                 break
-            
+
             try:
                 result_path = future.result()
                 if result_path:
@@ -477,7 +657,7 @@ def rasterize_pdf(
             except Exception as e:
                 logging.error(f"Rasterization failed for {pdf_file}: {e}")
                 failed_rasterizations.append(pdf_file)
-            
+
             processed_count += 1
             if progress_callback:
                 progress = int((processed_count / total_files) * 100)
@@ -486,10 +666,203 @@ def rasterize_pdf(
     return successful_rasterizations, failed_rasterizations
 
 
-def main_entry(args, progress_callback=None, cancel_event=None, pause_event=None, rasterize=True):
+def merge_pdfs(
+    merge_dir: Path,
+    output_pdf_path: Path | None = None,
+    recreate_bookmarks: bool = True,
+    dry_run: bool = False,
+    progress_callback=None,
+) -> tuple[list[str], list[str], dict]:
+    """
+    Merges all PDF files in a directory into a single PDF, with bookmark recreation,
+    prioritizing order from _bookmarks.json if available.
+    """
+    if not output_pdf_path:
+        output_pdf_path = merge_dir / "merged_output.pdf"
+
+    # --- Load Bookmarks if requested ---
+    bookmarks_structure = None
+    bookmarks_file = merge_dir / "_bookmarks.json"
+    if recreate_bookmarks and bookmarks_file.exists():
+        try:
+            with open(bookmarks_file, "r", encoding="utf-8") as f:
+                bookmarks_structure = json.load(f)
+            logging.info(f"Loaded bookmark structure from {bookmarks_file}")
+        except Exception as e:
+            logging.error(f"Failed to load bookmarks file {bookmarks_file}: {e}")
+            recreate_bookmarks = False  # Disable bookmark recreation if load fails
+    elif recreate_bookmarks:
+        logging.warning(
+            "'_bookmarks.json' not found. Cannot recreate bookmarks during merge."
+        )
+        recreate_bookmarks = False
+
+    # --- Determine files to merge and their order ---
+    files_to_merge_info: list[
+        tuple[Path, str]
+    ] = []  # (pdf_path, original_bookmark_title_for_offset)
+
+    # Collect all PDF files in the directory for efficient lookup
+    all_pdfs_in_merge_dir: dict[str, Path] = {}  # Map sanitized_title -> actual_path
+    for p in merge_dir.rglob("*.pdf"):
+        if not p.name.startswith("."):
+            stem = p.stem.replace("_rasterized", "")
+            all_pdfs_in_merge_dir[stem] = p
+
+    if bookmarks_structure:
+        # If bookmarks are present, use their order to determine merge sequence
+        def collect_files_from_bookmarks(bookmarks_list):
+            for bookmark in bookmarks_list:
+                sanitized_title = sanitize_filename(bookmark["title"])
+                # Try to find the file using the sanitized title (unrasterized or rasterized)
+                found_path = all_pdfs_in_merge_dir.get(sanitized_title)
+                if found_path:
+                    files_to_merge_info.append((found_path, bookmark["title"]))
+                else:
+                    logging.warning(
+                        f"PDF file for bookmark '{bookmark['title']}' (sanitized: '{sanitized_title}') not found in {merge_dir}. Skipping."
+                    )
+                if bookmark.get("children"):
+                    collect_files_from_bookmarks(bookmark["children"])
+
+        collect_files_from_bookmarks(bookmarks_structure)
+
+        if not files_to_merge_info:
+            logging.warning(
+                "No PDF files found matching bookmarks. Merging all PDFs alphabetically."
+            )
+            # Fallback to alphabetical if bookmarks didn't yield any files
+            for p in sorted(
+                [p for p in merge_dir.rglob("*.pdf") if not p.name.startswith(".")]
+            ):
+                stem = p.stem.replace("_rasterized", "")
+                files_to_merge_info.append(
+                    (p, stem)
+                )  # Use stem as "title" for offset if no bookmark
+            recreate_bookmarks = False  # Cannot recreate bookmarks without structure
+    else:
+        # If no bookmarks or recreation is disabled, merge all PDFs alphabetically
+        for p in sorted(
+            [p for p in merge_dir.rglob("*.pdf") if not p.name.startswith(".")]
+        ):
+            stem = p.stem.replace("_rasterized", "")
+            files_to_merge_info.append(
+                (p, stem)
+            )  # Use stem as "title" for offset if no bookmark
+        recreate_bookmarks = (
+            False  # Explicitly disable if not using bookmarks for order
+        )
+
+    if not files_to_merge_info:
+        logging.warning(f"No PDF files found to merge in {merge_dir}")
+        return [], [], {}
+
+    if dry_run:
+        logging.info(
+            f"[DRY RUN] Would merge {len(files_to_merge_info)} PDFs into {output_pdf_path}"
+        )
+        for pdf_path, _ in files_to_merge_info:
+            logging.info(f"  - {pdf_path}")
+        return [str(p) for p, _ in files_to_merge_info], [], {}
+
+    merger = PdfMerger()
+    failed_files = []
+    successful_files = []
+    page_offsets = {}
+    current_offset = 0
+    total_files = len(files_to_merge_info)
+
+    for i, (pdf_path, original_bookmark_title) in enumerate(files_to_merge_info):
+        try:
+            # Get page count for bookmark offset calculation
+            reader = PdfReader(pdf_path)
+            num_pages = len(reader.pages)
+
+            # Key page_offsets by the original bookmark title (sanitized)
+            # This is crucial for matching with the bookmark structure later
+            offset_key = sanitize_filename(original_bookmark_title)
+            page_offsets[offset_key] = current_offset
+            current_offset += num_pages
+
+            # Append to merger
+            merger.append(str(pdf_path))
+            successful_files.append(str(pdf_path))
+
+            if progress_callback:
+                progress = int(((i + 1) / total_files) * 100)
+                progress_callback(progress, f"Merging: {pdf_path.name}")
+
+        except Exception as e:
+            logging.error(f"Failed to process {pdf_path} for merging: {e}")
+            failed_files.append(str(pdf_path))
+
+    # --- Bookmark Recreation ---
+    if recreate_bookmarks and bookmarks_structure:
+        logging.info("Recreating bookmarks...")
+
+        def add_bookmarks_recursive(bookmarks, parent=None):
+            for b in bookmarks:
+                sanitized_title = sanitize_filename(b["title"])
+
+                # Ensure the sanitized title was actually merged and has an offset
+                if sanitized_title in page_offsets:
+                    page_num = page_offsets[sanitized_title]
+                    new_bookmark = merger.add_bookmark(b["title"], page_num, parent)
+
+                    if b.get("children"):
+                        add_bookmarks_recursive(b["children"], new_bookmark)
+                else:
+                    logging.warning(
+                        f"Could not find a merged PDF for bookmark: '{b['title']}' (Sanitized: '{sanitized_title}'). Skipping bookmark."
+                    )
+
+        add_bookmarks_recursive(bookmarks_structure)
+    elif (
+        recreate_bookmarks
+    ):  # Should not happen if logic is correct, but as a safeguard
+        logging.warning(
+            "Bookmark recreation requested but _bookmarks.json was not loaded or found."
+        )
+    else:
+        logging.info("Bookmark recreation not enabled or not possible.")
+
+    # --- Write Final PDF ---
+
+    try:
+        with open(output_pdf_path, "wb") as f:
+            merger.write(f)
+
+        logging.info(
+            f"Successfully merged {len(successful_files)} PDFs into {output_pdf_path}"
+        )
+
+    except Exception as e:
+        logging.error(f"Failed to write merged PDF {output_pdf_path}: {e}")
+
+        failed_files.extend([s for s in successful_files if s not in failed_files])
+
+        successful_files = []
+
+    finally:
+        merger.close()
+
+    report_data = {
+        "operation_type": "merge",
+        "output_file": str(output_pdf_path),
+        "total_files_merged": len(successful_files),
+        "success": [str(output_pdf_path)] if successful_files else [],
+        "failures": failed_files,
+    }
+
+    return [str(output_pdf_path)] if successful_files else [], failed_files, report_data
+
+
+def main_entry(
+    args, progress_callback=None, cancel_event=None, pause_event=None, rasterize=True
+):
     """Main entry point for GUI or direct script calls."""
     # --- Setup Logging ---
-    log_level = logging.DEBUG if getattr(args, 'verbose', False) else logging.INFO
+    log_level = logging.DEBUG if getattr(args, "verbose", False) else logging.INFO
     logging.basicConfig(
         level=log_level,
         format="%(asctime)s - %(levelname)s - %(message)s",
@@ -497,19 +870,23 @@ def main_entry(args, progress_callback=None, cancel_event=None, pause_event=None
     )
 
     # --- Argument Validation and Defaulting ---
-    if hasattr(args, 'merge') and args.merge:
-        if hasattr(args, 'input') and args.input:
+    if hasattr(args, "merge") and args.merge:
+        if hasattr(args, "input") and args.input:
             logging.error("Cannot use --merge with an input PDF file.")
             return [], [], {}
         args.input = None  # Ensure input is None for merge mode
-    elif not hasattr(args, 'input') or not args.input:
+    elif not hasattr(args, "input") or not args.input:
         logging.error("An input PDF file is required unless --merge is used.")
         return [], [], {}
 
-    if (not hasattr(args, 'output') or not args.output) and hasattr(args, 'input') and args.input:
+    if (
+        (not hasattr(args, "output") or not args.output)
+        and hasattr(args, "input")
+        and args.input
+    ):
         args.output = Path(f"{args.input.stem}_output")
 
-    if getattr(args, 'dry_run', False):
+    if getattr(args, "dry_run", False):
         logging.info("--- DRY RUN MODE --- No files will be written.")
 
     # --- Execute Main Logic ---
@@ -517,70 +894,157 @@ def main_entry(args, progress_callback=None, cancel_event=None, pause_event=None
     success_files, failed_files, report_data = [], [], {}
 
     try:
-        if hasattr(args, 'merge') and args.merge:
+        if hasattr(args, "merge") and args.merge:
             # --- MERGE MODE ---
             logging.info(f"Starting merge operation on directory: {args.merge}")
-            success_files, failed_files, report_data = merge_pdfs(
+            report_data["operation_type"] = "merge"
+            success_files, failed_files, merge_report = merge_pdfs(
                 args.merge,
-                output_pdf_path=getattr(args, 'merge_output', None),
-                recreate_bookmarks=not getattr(args, 'no_recreate_bookmarks', False),
-                dry_run=getattr(args, 'dry_run', False),
+                output_pdf_path=getattr(args, "merge_output", None),
+                recreate_bookmarks=not getattr(args, "no_recreate_bookmarks", False),
+                dry_run=getattr(args, "dry_run", False),
+                progress_callback=progress_callback,
             )
+            report_data.update(merge_report)  # Merge merge_pdfs's report data
         else:
             # --- SPLIT/RASTERIZE MODE ---
+            if args.input is None:
+                logging.error(
+                    "Input PDF file is required for split/rasterize operation when --merge is not used."
+                )
+                report_data["error"] = "Input PDF file is required."
+                report_data["operation_type"] = "split_rasterize"
+                return [], [], report_data
             logging.info(f"Starting split operation for: {args.input}")
+            report_data["operation_type"] = (
+                "split_and_rasterize" if rasterize else "split"
+            )
+
+            # The base output directory is now used directly for splitting.
+            output_for_splitting = args.output
+
+            # The flatten_output flag from arguments is used for the *unrasterized* split files.
+            flatten_output_for_splitting = getattr(args, "flatten_output", False)
+
             split_files, failed_splits = split_pdf_by_bookmarks(
                 pdf_path=args.input,
-                output_dir=args.output,
-                max_level=getattr(args, 'max_split_level', 0),
-                flatten_output=getattr(args, 'flatten_output', False),
-                dry_run=getattr(args, 'dry_run', False),
-                progress_callback=progress_callback, # Pass callbacks
+                output_dir=output_for_splitting,
+                max_level=getattr(args, "max_split_level", 0),
+                flatten_output=flatten_output_for_splitting,
+                dry_run=getattr(args, "dry_run", False),
+                progress_callback=progress_callback,
                 cancel_event=cancel_event,
                 pause_event=pause_event,
             )
             success_files.extend(split_files)
             failed_files.extend(failed_splits)
 
-            if rasterize and not getattr(args, 'dry_run', False):
-                logging.info("Starting rasterization...")
-                rasterized_files, failed_rasterizations = rasterize_pdf(
-                    split_files,
-                    resolution=getattr(args, 'resolution', RASTERIZE_RESOLUTION),
-                    workers=getattr(args, 'workers', os.cpu_count()),
-                    gs_path=getattr(args, 'gs_path', 'gs'),
-                    magick_path=getattr(args, 'magick_path', 'magick'),
-                    dry_run=getattr(args, 'dry_run', False),
-                    progress_callback=progress_callback, # Pass callbacks
-                    cancel_event=cancel_event,
-                    pause_event=pause_event,
-                )
-                success_files.extend(rasterized_files)
-                failed_files.extend(failed_rasterizations)
+            # After splitting, the output directories are known directly.
+            main_output_dir = output_for_splitting
+            rasterized_dir = main_output_dir / "rasterized"
 
-                if not getattr(args, 'keep_originals', False):
-                    logging.info("Cleaning up original split PDFs...")
-                    for pdf_file in split_files:
-                        if cancel_event and cancel_event.is_set(): break
-                        try:
-                            os.remove(pdf_file)
-                            logging.debug(f"Removed {pdf_file}")
-                        except OSError as e:
-                            logging.warning(f"Could not remove {pdf_file}: {e}")
+            if rasterize:
+                # --- External Tool Checks for Rasterization ---
+                gs_path = getattr(args, "gs_path", "gs")
+                magick_path = getattr(args, "magick_path", "magick")
+                if not _check_external_tool("Ghostscript", gs_path):
+                    report_data["error"] = (
+                        f"Ghostscript executable not found at '{gs_path}'."
+                    )
+                    report_data["failures"] = (
+                        failed_splits  # Include any previous split failures
+                    )
+                    return [], [], report_data
+                if not _check_external_tool("ImageMagick", magick_path):
+                    report_data["error"] = (
+                        f"ImageMagick executable not found at '{magick_path}'."
+                    )
+                    report_data["failures"] = (
+                        failed_splits  # Include any previous split failures
+                    )
+                    return [], [], report_data
+
+                # This block handles operations required when rasterization is active.
+
+                # Copy bookmarks file to rasterized dir if it exists
+                # This should always happen if rasterize is true, to preserve bookmarks for merged rasterized PDF.
+                bookmarks_file_source = main_output_dir / "_bookmarks.json"
+                if bookmarks_file_source.exists() and not getattr(
+                    args, "dry_run", False
+                ):
+                    rasterized_dir.mkdir(
+                        parents=True, exist_ok=True
+                    )  # Ensure it exists if not dry_run
+                    shutil.copy(
+                        bookmarks_file_source, rasterized_dir / "_bookmarks.json"
+                    )
+                    logging.info(f"Copied _bookmarks.json to {rasterized_dir}")
+
+                if not getattr(args, "dry_run", False):
+                    # Determine workers, ensuring it's an integer
+                    num_workers = getattr(args, "workers", os.cpu_count())
+                    if num_workers is None:
+                        num_workers = 1  # Fallback if os.cpu_count() returns None
+
+                    logging.info("Starting rasterization...")
+                    rasterized_files, failed_rasterizations = rasterize_pdf(
+                        pdf_files=split_files,
+                        output_dir=rasterized_dir,  # Rasterized PDFs go here
+                        split_dir=main_output_dir,  # Unrasterized source PDFs are here
+                        resolution=getattr(args, "resolution", RASTERIZE_RESOLUTION),
+                        workers=num_workers,  # Now explicitly an int
+                        gs_path=gs_path,  # Pass the checked path
+                        magick_path=magick_path,  # Pass the checked path
+                        dry_run=getattr(args, "dry_run", False),
+                        progress_callback=progress_callback,
+                        cancel_event=cancel_event,
+                        pause_event=pause_event,
+                    )
+                    success_files.extend(rasterized_files)
+                    failed_files.extend(failed_rasterizations)
+
+                    # Cleanup for individual unrasterized PDFs if keep_originals is False
+                    if not getattr(args, "keep_originals", False):
+                        logging.info(
+                            "Cleaning up original split PDFs after rasterization..."
+                        )
+                        for pdf_file_path_str in split_files:
+                            try:
+                                Path(pdf_file_path_str).unlink(missing_ok=True)
+                                logging.debug(
+                                    f"Removed original split PDF: {pdf_file_path_str}"
+                                )
+                            except OSError as e:
+                                logging.warning(
+                                    f"Could not remove original split PDF {pdf_file_path_str}: {e}"
+                                )
+                else:  # Dry run for rasterization
+                    logging.info("Dry run: Would start rasterization for split PDFs.")
+            else:  # Not rasterizing, just splitting
+                logging.info(
+                    f"PDF split complete. Unrasterized PDFs are in: {main_output_dir}"
+                )
+                # No specific actions needed here as split_pdf_by_bookmarks already handled creation.
+                # The 'split_files' list already contains the paths to the unrasterized PDFs.
 
             # Prepare report data for split/rasterize
-            report_data = {
-                "operation_type": "split_rasterize" if rasterize else "split_only",
-                "input_file": str(args.input),
-                "output_directory": str(args.output),
-                "total_files_processed": len(success_files) + len(failed_files),
-                "success": [str(f) for f in success_files],
-                "failures": [str(f) for f in failed_files],
-                "start_time": start_time,
-            }
+            report_data["output_file"] = (
+                str(main_output_dir)
+                if not rasterize
+                else str(rasterized_dir)
+            )
+            report_data["total_files_processed"] = len(success_files) + len(
+                failed_files
+            )
+            report_data["success"] = success_files
+            report_data["failures"] = failed_files
 
     except Exception as e:
-        logging.critical(f"A critical error occurred: {e}", exc_info=True)
+        logging.error(f"An unexpected error occurred: {e}", exc_info=True)
+        report_data["error"] = str(e)
+        report_data["operation_type"] = (
+            "merge" if hasattr(args, "merge") and args.merge else "split_rasterize"
+        )
 
     finally:
         # --- Generate Report ---
@@ -590,13 +1054,13 @@ def main_entry(args, progress_callback=None, cancel_event=None, pause_event=None
         logging.info(f"  - Success: {len(success_files)} files")
         logging.info(f"  - Failures: {len(failed_files)} files")
 
-        if hasattr(args, 'html_report') and args.html_report:
+        if hasattr(args, "html_report") and args.html_report:
             report_data["duration"] = duration
-            generate_html_report(report_data, args.html_report)
-
+            # generate_html_report(report_data, args.html_report) # Function not found, commented out
     return success_files, failed_files, report_data
 
-def main():
+
+def main_cli():
     """Main function to parse arguments and orchestrate the PDF processing."""
     parser = argparse.ArgumentParser(
         description="Split a PDF by its bookmarks and optionally rasterize the output.",
@@ -677,8 +1141,10 @@ def main():
         "-w",
         "--workers",
         type=int,
-        default=os.cpu_count(),
-        help="Number of worker processes for parallel tasks. Defaults to the number of CPU cores.",
+        default=os.cpu_count()
+        if os.cpu_count() is not None
+        else 1,  # Ensure default is an int
+        help="Number of worker processes for parallel tasks. Defaults to the number of CPU cores, or 1 if not detectable.",
     )
     general_group.add_argument(
         "--gs-path",
@@ -712,4 +1178,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main_cli()

@@ -23,6 +23,7 @@ dependencies = [
 
 [project.scripts]
 pdf-processor = "pdf_processor_suite.pdf_split_rasterize:main_cli"
+pdf-processor-gui = "pdf_processor_suite.pdf_gui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -17,6 +17,8 @@ from typing import Any  # Using Any for complex bookmark structures for now
 from PyPDF2 import PdfMerger, PdfReader, PdfWriter
 from PyPDF2.errors import PdfReadError
 
+from .subprocess_utils import run_subprocess
+
 # Import Destination for type checking bookmarks
 from PyPDF2.generic import Destination
 
@@ -319,22 +321,30 @@ def _create_output_directories(
     base_output_dir: Path, dry_run: bool
 ) -> tuple[Path, Path]:
     """
-    Creates the main output directory and rasterized subfolder.
-    Returns (main_output_dir, rasterized_dir).
-    The unrasterized PDFs will reside directly in main_output_dir.
+    Creates the main output directory and a subfolder for rasterized files.
+    Returns the paths for the main output and the rasterized content directory.
     """
-    main_output_dir = base_output_dir / "split_output"
+    # The main output directory is now the base directory provided.
+    main_output_dir = base_output_dir
+    # The rasterized directory is a subfolder within the main output directory.
     rasterized_dir = main_output_dir / "rasterized"
 
     if not dry_run:
+        # Create both directories. `exist_ok=True` prevents errors if they already exist.
         main_output_dir.mkdir(parents=True, exist_ok=True)
         rasterized_dir.mkdir(parents=True, exist_ok=True)
         logging.info(
-            f"Created output directories: {main_output_dir} (for unrasterized PDFs), {rasterized_dir}"
+            f"Ensured output directory exists: {main_output_dir}"
+        )
+        logging.info(
+            f"Rasterized files will be saved in: {rasterized_dir}"
         )
     else:
         logging.info(
-            f"Dry run: Would create output directories: {main_output_dir} (for unrasterized PDFs), {rasterized_dir}"
+            f"[DRY RUN] Would ensure output directory exists: {main_output_dir}"
+        )
+        logging.info(
+            f"[DRY RUN] Would create rasterized directory: {rasterized_dir}"
         )
 
     return main_output_dir, rasterized_dir
@@ -392,24 +402,23 @@ def split_pdf_by_bookmarks(
 
     successful_files: list[str] = []
     failed_files: list[str] = []
-    total_bookmarks_to_process = [0]  # Use a list to make it mutable inside the closure
-
-    def count_bookmarks(items):
+    
+    total_pages_to_process = [0]
+    def count_pages(items):
         for item in items:
             if max_level == 0 or item["level"] <= max_level:
-                total_bookmarks_to_process[0] += 1
+                total_pages_to_process[0] += (item["end_page_index"] - item["page_index"] + 1)
             if item.get("children"):
-                count_bookmarks(item["children"])
-
-    count_bookmarks(bookmarks)
-    processed_count = 0
+                count_pages(item["children"])
+    count_pages(bookmarks)
+    processed_pages = 0
 
     # --- Recursive Splitting Function ---
     def process_level(
         items: list[Bookmark],
         current_path: Path,
     ):
-        nonlocal processed_count
+        nonlocal processed_pages
         for i, bookmark in enumerate(items):
             # --- GUI Event Handling ---
             if cancel_event and cancel_event.is_set():
@@ -438,18 +447,19 @@ def split_pdf_by_bookmarks(
             # --- Save the PDF ---
             start_page = bookmark["page_index"]
             end_page = bookmark["end_page_index"]
+            num_pages_in_split = end_page - start_page + 1
 
             try:
                 _save_split_pdf(reader, file_path, start_page, end_page, dry_run)
                 successful_files.append(str(file_path))
+                processed_pages += num_pages_in_split
             except Exception as e:
                 logging.error(f"Failed to process bookmark '{bookmark['title']}': {e}")
                 failed_files.append(bookmark["title"])
 
             # --- Update Progress ---
-            processed_count += 1
             if progress_callback:
-                progress = int((processed_count / total_bookmarks_to_process[0]) * 100)
+                progress = int((processed_pages / total_pages_to_process[0]) * 100) if total_pages_to_process[0] > 0 else 0
                 progress_callback(progress, f"Processing: {bookmark['title']}")
 
             # --- Recurse into Children ---
@@ -484,8 +494,8 @@ def _rasterize_single_pdf(
     gs_path: str,
     magick_path: str,
     dry_run: bool = False,
-    cancel_event: threading.Event | None = None,
-    pause_event: threading.Event | None = None,
+    cancel_event: multiprocessing.Event | None = None,
+    pause_event: multiprocessing.Event | None = None,
 ) -> str:
     """
     Rasterizes a single PDF file to a new PDF with embedded images using Ghostscript.
@@ -517,6 +527,7 @@ def _rasterize_single_pdf(
         # --- Ghostscript command to convert PDF to images ---
         gs_command = [
             gs_path,
+            "-dQUIET",
             "-dSAFER",
             "-dBATCH",
             "-dNOPAUSE",
@@ -528,7 +539,13 @@ def _rasterize_single_pdf(
 
         logging.debug(f"Executing Ghostscript: {' '.join(gs_command)}")
         try:
-            subprocess.run(gs_command, check=True, capture_output=True, text=True)
+            return_code, stdout, stderr = run_subprocess(gs_command, timeout=600)
+            if return_code != 0:
+                raise subprocess.CalledProcessError(return_code, gs_command, output=stdout, stderr=stderr)
+        except subprocess.TimeoutExpired as e:
+            error_msg = f"Ghostscript timed out for {pdf_path} after {e.timeout} seconds. Error: {e.stderr.strip() if e.stderr else ''}"
+            logging.error(error_msg)
+            raise RuntimeError(f"Ghostscript Timeout: {error_msg}")
         except subprocess.CalledProcessError as e:
             error_msg = f"Ghostscript failed for {pdf_path}. Error: {e.stderr.strip()}"
             logging.error(error_msg)
@@ -563,7 +580,13 @@ def _rasterize_single_pdf(
 
         logging.debug(f"Executing ImageMagick: {' '.join(magick_command)}")
         try:
-            subprocess.run(magick_command, check=True, capture_output=True, text=True)
+            return_code, stdout, stderr = run_subprocess(magick_command, timeout=600)
+            if return_code != 0:
+                raise subprocess.CalledProcessError(return_code, magick_command, output=stdout, stderr=stderr)
+        except subprocess.TimeoutExpired as e:
+            error_msg = f"ImageMagick timed out for {pdf_path} after {e.timeout} seconds. Error: {e.stderr.strip() if e.stderr else ''}"
+            logging.error(error_msg)
+            raise RuntimeError(f"ImageMagick Timeout: {error_msg}")
         except subprocess.CalledProcessError as e:
             error_msg = f"ImageMagick failed for {pdf_path}. Error: {e.stderr.strip()}"
             logging.error(error_msg)
@@ -599,8 +622,19 @@ def rasterize_pdf(
     """
     successful_rasterizations = []
     failed_rasterizations = []
-    total_files = len(pdf_files)
-    processed_count = 0
+    
+    total_pages = 0
+    pages_per_file = {}
+    for pdf_file in pdf_files:
+        try:
+            reader = PdfReader(pdf_file)
+            num_pages = len(reader.pages)
+            total_pages += num_pages
+            pages_per_file[pdf_file] = num_pages
+        except Exception as e:
+            logging.warning(f"Could not read {pdf_file} to get page count: {e}")
+
+    processed_pages = 0
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_pdf = {
@@ -635,9 +669,11 @@ def rasterize_pdf(
                 logging.error(f"Rasterization failed for {pdf_file}: {e}")
                 failed_rasterizations.append(pdf_file)
 
-            processed_count += 1
-            if progress_callback:
-                progress = int((processed_count / total_files) * 100)
+            if pdf_file in pages_per_file:
+                processed_pages += pages_per_file[pdf_file]
+
+            if progress_callback and total_pages > 0:
+                progress = int((processed_pages / total_pages) * 100)
                 progress_callback(progress, f"Rasterizing: {Path(pdf_file).name}")
 
     return successful_rasterizations, failed_rasterizations
@@ -747,7 +783,16 @@ def merge_pdfs(
     successful_files = []
     page_offsets = {}
     current_offset = 0
-    total_files = len(files_to_merge_info)
+    
+    total_pages_to_merge = 0
+    for pdf_path, _ in files_to_merge_info:
+        try:
+            reader = PdfReader(pdf_path)
+            total_pages_to_merge += len(reader.pages)
+        except Exception:
+            pass # ignore if a file can't be read, it will fail later anyway
+
+    processed_pages = 0
 
     for i, (pdf_path, original_bookmark_title) in enumerate(files_to_merge_info):
         try:
@@ -764,9 +809,10 @@ def merge_pdfs(
             # Append to merger
             merger.append(str(pdf_path))
             successful_files.append(str(pdf_path))
+            processed_pages += num_pages
 
-            if progress_callback:
-                progress = int(((i + 1) / total_files) * 100)
+            if progress_callback and total_pages_to_merge > 0:
+                progress = int((processed_pages / total_pages_to_merge) * 100)
                 progress_callback(progress, f"Merging: {pdf_path.name}")
 
         except Exception as e:
@@ -897,17 +943,15 @@ def main_entry(
                 "split_and_rasterize" if rasterize else "split"
             )
 
-            # Determine initial output directory for the splitting process.
-            # `split_pdf_by_bookmarks` will create the actual "split_output" subfolder
-            # within this `base_output_for_splitting`.
-            base_output_for_splitting = args.output
+            # The base output directory is now used directly for splitting.
+            output_for_splitting = args.output
 
             # The flatten_output flag from arguments is used for the *unrasterized* split files.
             flatten_output_for_splitting = getattr(args, "flatten_output", False)
 
             split_files, failed_splits = split_pdf_by_bookmarks(
                 pdf_path=args.input,
-                output_dir=base_output_for_splitting,
+                output_dir=output_for_splitting,
                 max_level=getattr(args, "max_split_level", 0),
                 flatten_output=flatten_output_for_splitting,
                 dry_run=getattr(args, "dry_run", False),
@@ -918,9 +962,9 @@ def main_entry(
             success_files.extend(split_files)
             failed_files.extend(failed_splits)
 
-            # After splitting, determine the actual output paths created by split_pdf_by_bookmarks
-            actual_main_output_dir = base_output_for_splitting / "split_output"
-            actual_rasterized_dir = actual_main_output_dir / "rasterized"
+            # After splitting, the output directories are known directly.
+            main_output_dir = output_for_splitting
+            rasterized_dir = main_output_dir / "rasterized"
 
             if rasterize:
                 # --- External Tool Checks for Rasterization ---
@@ -947,17 +991,17 @@ def main_entry(
 
                 # Copy bookmarks file to rasterized dir if it exists
                 # This should always happen if rasterize is true, to preserve bookmarks for merged rasterized PDF.
-                bookmarks_file_source = actual_main_output_dir / "_bookmarks.json"
+                bookmarks_file_source = main_output_dir / "_bookmarks.json"
                 if bookmarks_file_source.exists() and not getattr(
                     args, "dry_run", False
                 ):
-                    actual_rasterized_dir.mkdir(
+                    rasterized_dir.mkdir(
                         parents=True, exist_ok=True
                     )  # Ensure it exists if not dry_run
                     shutil.copy(
-                        bookmarks_file_source, actual_rasterized_dir / "_bookmarks.json"
+                        bookmarks_file_source, rasterized_dir / "_bookmarks.json"
                     )
-                    logging.info(f"Copied _bookmarks.json to {actual_rasterized_dir}")
+                    logging.info(f"Copied _bookmarks.json to {rasterized_dir}")
 
                 if not getattr(args, "dry_run", False):
                     # Determine workers, ensuring it's an integer
@@ -968,8 +1012,8 @@ def main_entry(
                     logging.info("Starting rasterization...")
                     rasterized_files, failed_rasterizations = rasterize_pdf(
                         pdf_files=split_files,
-                        output_dir=actual_rasterized_dir,  # Rasterized PDFs go here
-                        split_dir=actual_main_output_dir,  # Unrasterized source PDFs are here
+                        output_dir=rasterized_dir,  # Rasterized PDFs go here
+                        split_dir=main_output_dir,  # Unrasterized source PDFs are here
                         resolution=getattr(args, "resolution", RASTERIZE_RESOLUTION),
                         workers=num_workers,  # Now explicitly an int
                         gs_path=gs_path,  # Pass the checked path
@@ -1001,16 +1045,16 @@ def main_entry(
                     logging.info("Dry run: Would start rasterization for split PDFs.")
             else:  # Not rasterizing, just splitting
                 logging.info(
-                    f"PDF split complete. Unrasterized PDFs are in: {actual_main_output_dir}"
+                    f"PDF split complete. Unrasterized PDFs are in: {main_output_dir}"
                 )
                 # No specific actions needed here as split_pdf_by_bookmarks already handled creation.
                 # The 'split_files' list already contains the paths to the unrasterized PDFs.
 
             # Prepare report data for split/rasterize
             report_data["output_file"] = (
-                str(actual_main_output_dir)
+                str(main_output_dir)
                 if not rasterize
-                else str(actual_rasterized_dir)
+                else str(rasterized_dir)
             )
             report_data["total_files_processed"] = len(success_files) + len(
                 failed_files
@@ -1039,7 +1083,7 @@ def main_entry(
     return success_files, failed_files, report_data
 
 
-def main():
+def main_cli():
     """Main function to parse arguments and orchestrate the PDF processing."""
     parser = argparse.ArgumentParser(
         description="Split a PDF by its bookmarks and optionally rasterize the output.",
@@ -1157,4 +1201,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main_cli()

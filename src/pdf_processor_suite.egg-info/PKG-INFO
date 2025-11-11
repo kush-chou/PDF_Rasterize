@@ -27,6 +27,27 @@ The project provides both a command-line interface (CLI) and a graphical user in
 *   **Parallel Processing**: Uses multiple CPU cores to speed up the rasterization process.
 *   **Flexible Configuration**: Allows customization of tool paths, resolution, and other settings.
 
+## Output Structure
+
+When you run the "Split & Rasterize" process, the output folder will have the following structure:
+
+```
+<output_folder>/
+├── unrasterized/
+│   ├── Chapter_1.pdf
+│   ├── Chapter_2.pdf
+│   └── ...
+└── rasterized/
+    ├── Chapter_1_rasterized.pdf
+    ├── Chapter_2_rasterized.pdf
+    └── ...
+```
+
+*   **unrasterized/**: Contains the initial PDFs that are split directly from the source document based on its bookmarks. If you do not select the "Keep Originals" option, this folder will be automatically deleted after the rasterization process is complete.
+*   **rasterized/**: Contains the final, rasterized versions of the split PDFs. These are the files that are ready to be merged.
+
+This structure keeps the intermediate and final files neatly organized.
+
 ## Prerequisites
 
 Before you can run this project, you must have the following software installed on your system:
@@ -83,7 +104,7 @@ python pdf_split_rasterize.py --input /path/to/your/document.pdf --output /path/
 *   `--resolution` or `-r`: The DPI for rasterization (default: 300).
 *   `--keep-originals`: Prevents the deletion of the intermediate split PDF files.
 *   `--workers` or `-w`: Number of parallel processes to use for rasterization.
-*   `--flatten-output`: Moves all generated files into a single flat directory.
+*   `--flatten-output`: When splitting without rasterizing, this option saves all split files into a single directory. When rasterizing, the output is always flat within the `unrasterized` and `rasterized` subdirectories.
 
 **To Merge:**
 
