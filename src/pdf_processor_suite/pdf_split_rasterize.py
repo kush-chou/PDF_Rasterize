@@ -5,13 +5,11 @@ import argparse
 import concurrent.futures
 import json
 import logging
-import multiprocessing
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 from pathlib import Path
 from typing import Any  # Using Any for complex bookmark structures for now
@@ -54,6 +52,7 @@ def sanitize_filename(name: FilePath) -> str:
     name = str(name)  # Ensure it's a string
     # Remove characters that are problematic in paths
     name = name.replace("/", "-").replace("\\", "-").replace(":", "-")
+    name = name.replace("\n", " ").replace("\r", " ")
     # Replace other potentially problematic characters
     invalid_chars = '<>""|?*'
     for char in invalid_chars:

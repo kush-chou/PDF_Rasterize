@@ -10,10 +10,14 @@ from types import SimpleNamespace
 from typing import Optional
 
 from PyQt6.QtCore import (
+    QEasingCurve,
     QObject,
+    QPropertyAnimation,
     QRunnable,
     QStandardPaths,
+    Qt,
     QThreadPool,
+    QTimer,
     QUrl,
     pyqtSignal,
 )
@@ -24,6 +28,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QGraphicsOpacityEffect,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -34,6 +39,8 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSpinBox,
+    QStyle,
+    QSystemTrayIcon,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
@@ -435,6 +442,82 @@ class SummaryDialog(QDialog):
         dialog.exec()
 
 
+class Toast(QWidget):
+    """Custom Toast Notification Widget."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.SubWindow)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+
+        self.toast_layout = QHBoxLayout(self)
+        self.toast_layout.setContentsMargins(20, 10, 20, 10)
+
+        self.label = QLabel("")
+        self.label.setFont(QFont("Segoe UI", 10))
+        self.label.setStyleSheet("color: white;")
+        self.toast_layout.addWidget(self.label)
+
+        self.setStyleSheet(
+            """
+            background-color: #333333;
+            border-radius: 10px;
+            """
+        )
+
+        # Opacity effect
+        self.opacity_effect = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self.opacity_effect)
+
+        # Animation
+        self.animation = QPropertyAnimation(self.opacity_effect, b"opacity")
+        self.animation.setDuration(500)  # 0.5 second fade
+
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.fade_out)
+
+        self.hide()
+
+    def show_message(self, message, duration=3000, parent_widget=None):
+        if parent_widget:
+            self.setParent(parent_widget)
+
+        self.label.setText(message)
+        self.adjustSize()
+
+        # Center horizontally, position near bottom
+        parent = self.parentWidget()
+        if parent:
+            parent_rect = parent.rect()
+            x = (parent_rect.width() - self.width()) // 2
+            y = parent_rect.height() - self.height() - 50
+            self.move(x, y)
+
+        self.show()
+        self.raise_()
+        self.fade_in()
+        self.timer.start(duration)
+
+    def fade_in(self):
+        self.animation.setStartValue(0.0)
+        self.animation.setEndValue(1.0)
+        self.animation.setEasingCurve(QEasingCurve.Type.OutQuad)
+        self.animation.start()
+
+    def fade_out(self):
+        self.animation.setStartValue(1.0)
+        self.animation.setEndValue(0.0)
+        self.animation.setEasingCurve(QEasingCurve.Type.InQuad)
+        try:
+            self.animation.finished.disconnect()
+        except TypeError:
+            pass
+        self.animation.finished.connect(self.hide)
+        self.animation.start()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -489,6 +572,18 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout(main_widget)
 
         self.create_menu()
+
+        # System Tray Icon for notifications
+        self.tray_icon = QSystemTrayIcon(self)
+        style = QApplication.style()
+        if style:
+            self.tray_icon.setIcon(
+                style.standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+            )
+        self.tray_icon.show()
+
+        # Initialize Toast
+        self.toast = Toast(self)
 
         self.tabs = QTabWidget()
         self.split_tab = QWidget()
@@ -785,7 +880,27 @@ class MainWindow(QMainWindow):
     def show_error(self, title, message):
         QMessageBox.critical(self, title, message)
 
+    def show_notification(self, title, message):
+        """Show a system notification and an in-app toast."""
+        # Show in-app toast
+        if hasattr(self, "toast"):
+            self.toast.show_message(f"{title}: {message}", parent_widget=self)
+
+        if self.tray_icon.isSystemTrayAvailable():
+            self.tray_icon.showMessage(
+                title, message, QSystemTrayIcon.MessageIcon.Information, 3000
+            )
+
     def show_summary(self, report_data):
+        # Trigger system notification
+        op_type = (
+            report_data.get("operation_type", "Operation").replace("_", " ").title()
+        )
+        self.show_notification(
+            "Process Complete",
+            f"{op_type} finished.\nProcessed: {report_data.get('total_files_processed', 0)}",
+        )
+
         summary_dialog = SummaryDialog(report_data, self)
         summary_dialog.exec()
 
