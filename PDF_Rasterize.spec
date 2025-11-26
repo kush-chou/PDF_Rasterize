@@ -2,8 +2,8 @@
 
 
 a = Analysis(
-    ['pdf_gui.py'],
-    pathex=[],
+    ['src/pdf_processor_suite/pdf_gui.py'],
+    pathex=['src'],
     binaries=[],
     datas=[('config.json', '.')],
     hiddenimports=['PyQt6'],

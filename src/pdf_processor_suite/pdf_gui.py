@@ -4,14 +4,20 @@ import logging
 import multiprocessing
 import os
 import sys
-import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
 
-from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal, QStandardPaths
-from PyQt6.QtGui import QAction, QFont
+from PyQt6.QtCore import (
+    QObject,
+    QRunnable,
+    QStandardPaths,
+    QThreadPool,
+    QUrl,
+    pyqtSignal,
+)
+from PyQt6.QtGui import QAction, QDesktopServices, QFont
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -34,8 +40,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import pdf_split_rasterize
+# Handle relative imports when running as a script
+if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from . import pdf_split_rasterize
 
 # Define a simple Args class to hold attributes like argparse.Namespace
 # --- Configuration Management ---
@@ -68,7 +77,9 @@ class ConfigManager:
                     else:
                         raise TypeError("Configuration is not a dictionary.")
             except (json.JSONDecodeError, TypeError) as e:
-                logging.warning(f"Could not read config.json: {e}. Using default paths.")
+                logging.warning(
+                    f"Could not read config.json: {e}. Using default paths."
+                )
                 # Show a warning to the user
                 msg_box = QMessageBox()
                 msg_box.setIcon(QMessageBox.Icon.Warning)
@@ -102,7 +113,9 @@ class ConfigManager:
 def get_config_dir() -> Path:
     """Return the application's configuration directory."""
     return Path(
-        QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppConfigLocation)
+        QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.AppConfigLocation
+        )
     )
 
 
@@ -218,7 +231,9 @@ def run_split_and_rasterize_wrapper(
     report_data = report_data or {}
     report_data.setdefault("start_time", start_time)
     report_data.setdefault("end_time", time.time())
-    report_data.setdefault("elapsed_time", report_data["end_time"] - report_data["start_time"])
+    report_data.setdefault(
+        "elapsed_time", report_data["end_time"] - report_data["start_time"]
+    )
 
     if not cancel_event.is_set():
         signals.summary.emit(report_data)
@@ -258,7 +273,9 @@ def run_merge_wrapper(
     report_data = report_data or {}
     report_data.setdefault("start_time", start_time)
     report_data.setdefault("end_time", time.time())
-    report_data.setdefault("elapsed_time", report_data["end_time"] - report_data["start_time"])
+    report_data.setdefault(
+        "elapsed_time", report_data["end_time"] - report_data["start_time"]
+    )
 
     if not cancel_event.is_set():  # Only emit summary if not cancelled
         signals.summary.emit(report_data)
@@ -343,9 +360,7 @@ class SummaryDialog(QDialog):
         summary_layout = QGridLayout()
         summary_layout.addWidget(QLabel("Operation:"), 0, 0)
         summary_layout.addWidget(
-            QLabel(
-                report_data.get("operation_type", "N/A").replace("_", " ").title()
-            ),
+            QLabel(report_data.get("operation_type", "N/A").replace("_", " ").title()),
             0,
             1,
         )
@@ -356,9 +371,7 @@ class SummaryDialog(QDialog):
             QLabel(str(report_data.get("total_files_processed", 0))), 2, 1
         )
         summary_layout.addWidget(QLabel("Successful:"), 3, 0)
-        summary_layout.addWidget(
-            QLabel(str(len(report_data.get("success", [])))), 3, 1
-        )
+        summary_layout.addWidget(QLabel(str(len(report_data.get("success", [])))), 3, 1)
         summary_layout.addWidget(QLabel("Failed:"), 4, 0)
         summary_layout.addWidget(
             QLabel(str(len(report_data.get("failures", [])))), 4, 1
@@ -382,6 +395,15 @@ class SummaryDialog(QDialog):
 
             layout.addWidget(details_group)
 
+        # Open Output Folder Button
+        output_path = self.report_data.get("output_file")
+        if output_path and os.path.exists(output_path):
+            open_folder_btn = QPushButton("Open Output Folder")
+            open_folder_btn.clicked.connect(
+                lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(output_path))
+            )
+            layout.addWidget(open_folder_btn)
+
         # OK button
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
         button_box.accepted.connect(self.accept)
@@ -394,7 +416,7 @@ class SummaryDialog(QDialog):
     def show_failures(self):
         """Show a list of failed files and the reasons."""
         failures = self.report_data.get("failures", [])
-        formatted_failures = [f"{path}: {error}" for path, error in failures]
+        formatted_failures = [str(f) for f in failures]
         self.show_details_list("Failed Files", formatted_failures)
 
     def show_details_list(self, title, items):
@@ -429,15 +451,37 @@ class MainWindow(QMainWindow):
         self.set_running_state(False, "merge")
 
     def set_running_state(self, running: bool, operation_type: str):
-        """Show or hide buttons based on the running state."""
+        """Show or hide buttons and disable inputs based on the running state."""
         if operation_type == "split":
+            # Buttons
             self.split_start_btn.setHidden(running)
             self.split_pause_resume_btn.setHidden(not running)
             self.split_cancel_btn.setHidden(not running)
+
+            # Inputs
+            self.input_path_edit.setEnabled(not running)
+            self.output_path_edit.setEnabled(not running)
+            self.browse_in_btn.setEnabled(not running)
+            self.browse_out_btn.setEnabled(not running)
+            self.dpi_spinbox.setEnabled(not running)
+            self.workers_spinbox.setEnabled(not running)
+            self.keep_originals_chk.setEnabled(not running)
+            self.flatten_output_chk.setEnabled(not running)
+            self.create_parent_splits_chk.setEnabled(not running)
+            self.rasterize_checkbox.setEnabled(not running)
+            self.limit_level_chk.setEnabled(not running)
+            self.max_level_spinbox.setEnabled(not running)
+
         elif operation_type == "merge":
+            # Buttons
             self.merge_start_btn.setHidden(running)
             self.merge_pause_resume_btn.setHidden(not running)
             self.merge_cancel_btn.setHidden(not running)
+
+            # Inputs
+            self.merge_dir_edit.setEnabled(not running)
+            self.browse_merge_btn.setEnabled(not running)
+            self.recreate_bookmarks_chk.setEnabled(not running)
 
     def create_ui(self):
         main_widget = QWidget()
@@ -499,16 +543,16 @@ class MainWindow(QMainWindow):
         io_layout = QGridLayout(io_group)
         self.input_path_edit = QLineEdit()
         self.output_path_edit = QLineEdit()
-        browse_in_btn = QPushButton("Browse")
-        browse_in_btn.clicked.connect(
+        self.browse_in_btn = QPushButton("Browse")
+        self.browse_in_btn.clicked.connect(
             lambda: self.browse(
                 self.input_path_edit,
                 "Select Input PDF",
                 QFileDialog.FileMode.ExistingFile,
             )
         )
-        browse_out_btn = QPushButton("Browse")
-        browse_out_btn.clicked.connect(
+        self.browse_out_btn = QPushButton("Browse")
+        self.browse_out_btn.clicked.connect(
             lambda: self.browse(
                 self.output_path_edit,
                 "Select Output Folder",
@@ -517,42 +561,43 @@ class MainWindow(QMainWindow):
         )
         io_layout.addWidget(QLabel("Input PDF:"), 0, 0)
         io_layout.addWidget(self.input_path_edit, 0, 1)
-        io_layout.addWidget(browse_in_btn, 0, 2)
+        io_layout.addWidget(self.browse_in_btn, 0, 2)
         io_layout.addWidget(QLabel("Output Folder:"), 1, 0)
         io_layout.addWidget(self.output_path_edit, 1, 1)
-        io_layout.addWidget(browse_out_btn, 1, 2)
+        io_layout.addWidget(self.browse_out_btn, 1, 2)
         layout.addWidget(io_group)
 
         settings_group = QGroupBox("Settings")
         settings_layout = QGridLayout(settings_group)
         self.dpi_spinbox = QSpinBox()
         self.dpi_spinbox.setRange(100, 1200)
-        self.dpi_spinbox.setValue(config_manager.get("dpi", 300))
+        self.dpi_spinbox.setValue(int(config_manager.get("dpi", 200) or 200))
         self.workers_spinbox = QSpinBox()
         self.workers_spinbox.setRange(1, os.cpu_count() or 1)
-        self.workers_spinbox.setValue(config_manager.get("workers", os.cpu_count() or 1))
-        self.keep_originals_chk = QCheckBox("Keep original split PDFs")
-        self.keep_originals_chk.setChecked(config_manager.get("keep_originals", False))
-        self.flatten_output_chk = QCheckBox("Create flat output folder")
-        self.flatten_output_chk.setChecked(config_manager.get("flatten_output", True))
+        self.workers_spinbox.setValue(
+            int(config_manager.get("workers", os.cpu_count() or 1) or 1)
+        )
+
         settings_layout.addWidget(QLabel("DPI:"), 0, 0)
         settings_layout.addWidget(self.dpi_spinbox, 0, 1)
         settings_layout.addWidget(QLabel("Workers:"), 0, 2)
         settings_layout.addWidget(self.workers_spinbox, 0, 3)
-        settings_layout.addWidget(self.keep_originals_chk, 1, 0, 1, 2)
-        settings_layout.addWidget(self.flatten_output_chk, 3, 0, 1, 4)
-
-        # Option to control whether parent bookmark sections get their own split/rasterized files
-        self.create_parent_splits_chk = QCheckBox("Create parent bookmark PDF files")
-        self.create_parent_splits_chk.setChecked(
-            config_manager.get("create_parent_splits", True)
-        )
-        settings_layout.addWidget(self.create_parent_splits_chk, 2, 0, 1, 4)
 
         self.rasterize_checkbox = QCheckBox("Rasterize after splitting")
-        self.rasterize_checkbox.setChecked(config_manager.get("rasterize", True))
-        # Place rasterize checkbox above the bookmark-level controls
-        settings_layout.addWidget(self.rasterize_checkbox, 4, 0, 1, 2)
+        self.rasterize_checkbox.setChecked(bool(config_manager.get("rasterize", True)))
+        settings_layout.addWidget(self.rasterize_checkbox, 1, 0, 1, 4)
+
+        self.keep_originals_chk = QCheckBox("Keep original split PDFs")
+        self.keep_originals_chk.setChecked(
+            bool(config_manager.get("keep_originals", False))
+        )
+        settings_layout.addWidget(self.keep_originals_chk, 2, 0, 1, 4)
+
+        self.flatten_output_chk = QCheckBox("Create flat output folder")
+        self.flatten_output_chk.setChecked(
+            bool(config_manager.get("flatten_output", True))
+        )
+        settings_layout.addWidget(self.flatten_output_chk, 3, 0, 1, 4)
 
         self.limit_level_chk = QCheckBox("Limit splitting to bookmark level:")
         self.limit_level_chk.setChecked(True)
@@ -561,9 +606,15 @@ class MainWindow(QMainWindow):
         self.max_level_spinbox.setValue(1)
         self.max_level_spinbox.setEnabled(True)
         self.limit_level_chk.toggled.connect(self.max_level_spinbox.setEnabled)
-        # Move bookmark level controls down one row
-        settings_layout.addWidget(self.limit_level_chk, 5, 0, 1, 2)
-        settings_layout.addWidget(self.max_level_spinbox, 5, 2, 1, 2)
+        settings_layout.addWidget(self.limit_level_chk, 4, 0, 1, 2)
+        settings_layout.addWidget(self.max_level_spinbox, 4, 2, 1, 2)
+
+        # Option to control whether parent bookmark sections get their own split/rasterized files
+        self.create_parent_splits_chk = QCheckBox("Create parent bookmark PDF files")
+        self.create_parent_splits_chk.setChecked(
+            bool(config_manager.get("create_parent_splits", True))
+        )
+        settings_layout.addWidget(self.create_parent_splits_chk, 5, 0, 1, 4)
         layout.addWidget(settings_group)
 
         self.split_start_btn = QPushButton("Start Processing")
@@ -584,8 +635,8 @@ class MainWindow(QMainWindow):
         input_group = QGroupBox("Input Directory")
         input_layout = QGridLayout(input_group)
         self.merge_dir_edit = QLineEdit()
-        browse_merge_btn = QPushButton("Browse")
-        browse_merge_btn.clicked.connect(
+        self.browse_merge_btn = QPushButton("Browse")
+        self.browse_merge_btn.clicked.connect(
             lambda: self.browse(
                 self.merge_dir_edit,
                 "Select Folder with Rasterized PDFs",
@@ -594,7 +645,7 @@ class MainWindow(QMainWindow):
         )
         input_layout.addWidget(QLabel("Folder:"), 0, 0)
         input_layout.addWidget(self.merge_dir_edit, 0, 1)
-        input_layout.addWidget(browse_merge_btn, 0, 2)
+        input_layout.addWidget(self.browse_merge_btn, 0, 2)
         layout.addWidget(input_group)
 
         self.recreate_bookmarks_chk = QCheckBox("Re-create bookmarks from original PDF")
@@ -620,7 +671,9 @@ class MainWindow(QMainWindow):
         if mode == QFileDialog.FileMode.Directory:
             path = QFileDialog.getExistingDirectory(self, caption)
         else:
-            path, _ = QFileDialog.getOpenFileName(self, caption, "", "PDF Files (*.pdf)")
+            path, _ = QFileDialog.getOpenFileName(
+                self, caption, "", "PDF Files (*.pdf)"
+            )
 
         if path:
             line_edit.setText(path)
@@ -635,6 +688,7 @@ class MainWindow(QMainWindow):
             )
             return
 
+        self.log_box.clear()
         self.set_running_state(True, "split")
         self.split_pause_resume_btn.setText("Pause")
         self.progress_bar.setValue(0)
@@ -743,9 +797,11 @@ class MainWindow(QMainWindow):
     def toggle_pause_resume(self):
         current_tab_index = self.tabs.currentIndex()
         is_split_tab = current_tab_index == 0
-        
-        button = self.split_pause_resume_btn if is_split_tab else self.merge_pause_resume_btn
-        
+
+        button = (
+            self.split_pause_resume_btn if is_split_tab else self.merge_pause_resume_btn
+        )
+
         if self.pause_event.is_set():
             self.pause_event.clear()
             self.update_log("--- Resumed ---")

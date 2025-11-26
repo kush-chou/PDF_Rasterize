@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+
 import argparse
 import concurrent.futures
 import json
 import logging
+import multiprocessing
 import os
 import shutil
 import subprocess
 import sys
-import multiprocessing
 import tempfile
 import threading
 import time
@@ -19,10 +20,25 @@ from typing import Any  # Using Any for complex bookmark structures for now
 from PyPDF2 import PdfMerger, PdfReader, PdfWriter
 from PyPDF2.errors import PdfReadError
 
+# Import Destination for type checking bookmarks
+from PyPDF2.generic import Destination, Fit
+
 from .subprocess_utils import run_subprocess
 
-# Import Destination for type checking bookmarks
-from PyPDF2.generic import Destination
+# --- Monkey Patch PyPDF2 Fit ---
+# Fix for "not enough values to unpack" with malformed /XYZ destinations
+_original_fit_init = Fit.__init__
+
+
+def _patched_fit_init(self, fit_type, fit_args=tuple()):
+    if fit_type == "/XYZ" and len(fit_args) < 3:
+        fit_args = list(fit_args) + [None] * (3 - len(fit_args))
+        fit_args = tuple(fit_args)
+    _original_fit_init(self, fit_type, fit_args)
+
+
+Fit.__init__ = _patched_fit_init
+# -------------------------------
 
 # --- Global Configuration ---
 RASTERIZE_RESOLUTION = 300  # DPI for rasterization
@@ -335,19 +351,13 @@ def _create_output_directories(
         # Create both directories. `exist_ok=True` prevents errors if they already exist.
         main_output_dir.mkdir(parents=True, exist_ok=True)
         rasterized_dir.mkdir(parents=True, exist_ok=True)
-        logging.info(
-            f"Ensured output directory exists: {main_output_dir}"
-        )
-        logging.info(
-            f"Rasterized files will be saved in: {rasterized_dir}"
-        )
+        logging.info(f"Ensured output directory exists: {main_output_dir}")
+        logging.info(f"Rasterized files will be saved in: {rasterized_dir}")
     else:
         logging.info(
             f"[DRY RUN] Would ensure output directory exists: {main_output_dir}"
         )
-        logging.info(
-            f"[DRY RUN] Would create rasterized directory: {rasterized_dir}"
-        )
+        logging.info(f"[DRY RUN] Would create rasterized directory: {rasterized_dir}")
 
     return main_output_dir, rasterized_dir
 
@@ -405,14 +415,18 @@ def split_pdf_by_bookmarks(
 
     successful_files: list[str] = []
     failed_files: list[str] = []
-    
+
     total_pages_to_process = [0]
+
     def count_pages(items):
         for item in items:
             if max_level == 0 or item["level"] <= max_level:
-                total_pages_to_process[0] += (item["end_page_index"] - item["page_index"] + 1)
+                total_pages_to_process[0] += (
+                    item["end_page_index"] - item["page_index"] + 1
+                )
             if item.get("children"):
                 count_pages(item["children"])
+
     count_pages(bookmarks)
     processed_pages = 0
 
@@ -468,12 +482,18 @@ def split_pdf_by_bookmarks(
                     successful_files.append(str(file_path))
                     processed_pages += num_pages_in_split
                 except Exception as e:
-                    logging.error(f"Failed to process bookmark '{bookmark['title']}': {e}")
+                    logging.error(
+                        f"Failed to process bookmark '{bookmark['title']}': {e}"
+                    )
                     failed_files.append(bookmark["title"])
 
             # --- Update Progress ---
             if progress_callback:
-                progress = int((processed_pages / total_pages_to_process[0]) * 100) if total_pages_to_process[0] > 0 else 0
+                progress = (
+                    int((processed_pages / total_pages_to_process[0]) * 100)
+                    if total_pages_to_process[0] > 0
+                    else 0
+                )
                 progress_callback(progress, f"Processing: {bookmark['title']}")
 
             # --- Recurse into Children ---
@@ -508,8 +528,8 @@ def _rasterize_single_pdf(
     gs_path: str,
     magick_path: str,
     dry_run: bool = False,
-    cancel_event: multiprocessing.Event | None = None,
-    pause_event: multiprocessing.Event | None = None,
+    cancel_event: Any = None,
+    pause_event: Any = None,
 ) -> str:
     """
     Rasterizes a single PDF file to a new PDF with embedded images using Ghostscript.
@@ -553,9 +573,13 @@ def _rasterize_single_pdf(
 
         logging.debug(f"Executing Ghostscript: {' '.join(gs_command)}")
         try:
-            return_code, stdout, stderr = run_subprocess(gs_command, timeout=600)
+            return_code, stdout, stderr = run_subprocess(
+                gs_command, timeout=600, cancel_event=cancel_event
+            )
             if return_code != 0:
-                raise subprocess.CalledProcessError(return_code, gs_command, output=stdout, stderr=stderr)
+                raise subprocess.CalledProcessError(
+                    return_code, gs_command, output=stdout, stderr=stderr
+                )
         except subprocess.TimeoutExpired as e:
             error_msg = f"Ghostscript timed out for {pdf_path} after {e.timeout} seconds. Error: {e.stderr.strip() if e.stderr else ''}"
             logging.error(error_msg)
@@ -594,9 +618,13 @@ def _rasterize_single_pdf(
 
         logging.debug(f"Executing ImageMagick: {' '.join(magick_command)}")
         try:
-            return_code, stdout, stderr = run_subprocess(magick_command, timeout=600)
+            return_code, stdout, stderr = run_subprocess(
+                magick_command, timeout=600, cancel_event=cancel_event
+            )
             if return_code != 0:
-                raise subprocess.CalledProcessError(return_code, magick_command, output=stdout, stderr=stderr)
+                raise subprocess.CalledProcessError(
+                    return_code, magick_command, output=stdout, stderr=stderr
+                )
         except subprocess.TimeoutExpired as e:
             error_msg = f"ImageMagick timed out for {pdf_path} after {e.timeout} seconds. Error: {e.stderr.strip() if e.stderr else ''}"
             logging.error(error_msg)
@@ -628,15 +656,15 @@ def rasterize_pdf(
     magick_path: str,
     dry_run: bool = False,
     progress_callback=None,
-    cancel_event: threading.Event | None = None,
-    pause_event: threading.Event | None = None,
+    cancel_event: Any = None,
+    pause_event: Any = None,
 ) -> tuple[list[str], list[str]]:
     """
     Rasterizes a list of PDF files in parallel.
     """
     successful_rasterizations = []
     failed_rasterizations = []
-    
+
     total_pages = 0
     pages_per_file = {}
     for pdf_file in pdf_files:
@@ -797,14 +825,14 @@ def merge_pdfs(
     successful_files = []
     page_offsets = {}
     current_offset = 0
-    
+
     total_pages_to_merge = 0
     for pdf_path, _ in files_to_merge_info:
         try:
             reader = PdfReader(pdf_path)
             total_pages_to_merge += len(reader.pages)
         except Exception:
-            pass # ignore if a file can't be read, it will fail later anyway
+            pass  # ignore if a file can't be read, it will fail later anyway
 
     processed_pages = 0
 
@@ -1067,9 +1095,7 @@ def main_entry(
 
             # Prepare report data for split/rasterize
             report_data["output_file"] = (
-                str(main_output_dir)
-                if not rasterize
-                else str(rasterized_dir)
+                str(main_output_dir) if not rasterize else str(rasterized_dir)
             )
             report_data["total_files_processed"] = len(success_files) + len(
                 failed_files

@@ -116,3 +116,38 @@ You can configure the paths to the Ghostscript and ImageMagick executables by ed
 ```
 
 If the executables are in your system's PATH, the default values should work. Otherwise, provide the full absolute path to `gs` and `magick`. The GUI also provides a settings window to configure these paths.
+
+## Build Instructions
+
+To create a standalone executable for the GUI using PyInstaller:
+
+1.  **Install PyInstaller:**
+    ```bash
+    pip install pyinstaller
+    ```
+
+2.  **Run the Build Command:**
+    Execute the following command in the project root directory:
+    ```bash
+    python -m PyInstaller PDF_Rasterize.spec
+    ```
+
+3.  **Locate the Executable:**
+    After the build completes, the executable will be available in the `dist/PDF_Rasterize` folder.
+
+## Roadmap
+
+- [x] Basic splitting and rasterizing based on bookmarks
+- [x] Graphical User Interface (GUI) with PyQt6
+- [x] Parallel processing support for faster rasterization
+- [x] Configuration for Ghostscript and ImageMagick paths
+- [x] Cancellation of long-running processes
+- [ ] Add support for encrypted PDFs (password prompt)
+- [ ] Implement detailed logging to file
+- [ ] Drag and drop support in GUI
+- [ ] Dark mode theme toggle
+- [ ] Mac/Linux specific build instructions and testing
+
+## License
+
+This project is licensed under the MIT License.

@@ -1,7 +1,9 @@
 import subprocess
 import sys
+import time
 
-def run_subprocess(command, timeout=None):
+
+def run_subprocess(command, timeout=None, cancel_event=None):
     """
     Runs a command in a subprocess, capturing output and handling platform-specific
     process creation flags to prevent the creation of new console windows on Windows.
@@ -31,13 +33,30 @@ def run_subprocess(command, timeout=None):
         )
 
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
+        if cancel_event:
+            start_time = time.time()
+            while True:
+                if cancel_event.is_set():
+                    process.kill()
+                    process.communicate()
+                    raise InterruptedError("Subprocess cancelled.")
+
+                try:
+                    stdout, stderr = process.communicate(timeout=0.5)
+                    break
+                except subprocess.TimeoutExpired:
+                    if timeout and (time.time() - start_time > timeout):
+                        raise
+                    continue
+        else:
+            stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as e:
         process.kill()
         # It's important to communicate again after killing to get any remaining output
         out, err = process.communicate()
         # Re-raise the exception with the captured output
-        raise subprocess.TimeoutExpired(command, timeout, output=out, stderr=err) from e
-
+        raise subprocess.TimeoutExpired(
+            command, float(timeout or 0), output=out, stderr=err
+        ) from e
 
     return process.returncode, stdout, stderr
